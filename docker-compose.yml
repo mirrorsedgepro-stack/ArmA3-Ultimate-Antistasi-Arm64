@@ -1,0 +1,50 @@
+services:
+  arma3:
+    build: .
+    image: arma3-antistasi:latest
+    container_name: arma3_antistasi
+    network_mode: host
+    restart: "no"
+    env_file: .env
+    volumes:
+      # Persistent storage for Arma 3 server root directory and binaries
+      - server_base:/arma3
+
+      # Host bind mounts for configurations, missions, and custom mods
+      - ./configs:/arma3/configs
+      - ./missions:/arma3/mpmissions
+      - ./mods:/arma3/mods
+      - ./servermods:/arma3/servermods
+
+      # Persistent storage for Arma 3 server base game depots & DLCs
+      - addons:/arma3/addons
+      - argo:/arma3/argo
+      - enoch:/arma3/enoch
+      - expansion:/arma3/expansion
+      - heli:/arma3/heli
+      - jets:/arma3/jets
+      - orange:/arma3/orange
+
+      # Persistent storage for SteamCMD and downloaded Steam Workshop mods
+      - steamcmd:/steamcmd
+      - workshop:/arma3/steamapps
+
+      # Persistent storage for Steam credentials, session tokens, and Steam Guard
+      - steam_data:/root/Steam
+      - steam_root:/root/.steam
+
+volumes:
+  server_base:
+    name: armaa_server_base
+    external: true
+  addons:
+  argo:
+  enoch:
+  expansion:
+  heli:
+  jets:
+  orange:
+  steamcmd:
+  workshop:
+  steam_data:
+  steam_root:

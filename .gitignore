@@ -1,0 +1,23 @@
+# Environment and Credentials
+.env
+
+# Arma 3 Profiles and Campaign Saves
+configs/profiles/
+
+# Automated Backups
+backups/*.tar.gz
+
+# Local Mods and Downloaded Assets
+mods/*
+!mods/.gitkeep
+servermods/*
+!servermods/.gitkeep
+missions/*.pbo
+!missions/.gitkeep
+
+# Temporary / Log files
+*.log
+.DS_Store
+
+# Python bytecode
+__pycache__/
