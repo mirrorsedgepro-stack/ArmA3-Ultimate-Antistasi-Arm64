@@ -4,6 +4,10 @@ services:
     image: arma3-antistasi:latest
     container_name: arma3_antistasi
     network_mode: host
+    # DGX Spark (GB10): 5-9,15-19 are the Cortex-X925 performance cores;
+    # 0-4,10-14 are slower A725 efficiency cores. Keep Arma's per-process
+    # main threads (server + HCs) off the efficiency cores.
+    cpuset: "5-9,15-19"
     restart: "no"
     env_file: .env
     volumes:
