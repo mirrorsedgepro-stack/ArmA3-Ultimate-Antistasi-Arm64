@@ -6,8 +6,8 @@ A production-ready Docker containerization setup for hosting a 32-player **Antis
 
 ## Architecture & Features
 
-- **Base Image:** Custom ARM64/x86_64 container powered by `ghcr.io/sonroyaalmerol/steamcmd-arm64:latest` with Box64 Dynarec for high-performance execution on aarch64 CPUs.
-- **Architecture Support:** Native execution on ARM64 (`aarch64`) via Box64 dynamic recompilation and multi-arch x86_64/amd64 support.
+- **Base Image:** `ubuntu:24.04` (ARM64) running [FEX-Emu](https://fex-emu.com/) with a bundled x86_64 Debian userland; SteamCMD, the server and the Headless Clients all run as x86_64 under FEX.
+- **Architecture Support:** ARM64 (`aarch64`) hosts. Building the image needs amd64 emulation for the x86 userland stage, which `./scripts/manage.sh start` sets up automatically.
 - **Mission Framework:** [Antistasi Ultimate](https://steamcommunity.com/sharedfiles/filedetails/?id=3020755032) mod edition on Altis.
 - **Modset:** RHS Escalation suite (AFRF, USAF, GREF, SAF) + CBA_A3.
 - **Headless Clients (HCs):** 2 containerized Headless Clients automatically connected via loopback to distribute AI garrisons, patrols, and QRFs across dedicated CPU cores.
@@ -95,7 +95,7 @@ This runs pre-flight checks (verifying `.env` and configuring `binfmt` on ARM64 
 
 ### 4. Follow Initial Startup & Mod Downloads
 
-On first launch, SteamCMD will download the Arma 3 server binary (~5 GB) and all 6 Workshop mods (~25 GB). You can stream live progress:
+On first launch, SteamCMD will download the Arma 3 server binary (~5 GB) and all 7 Workshop mods (~25 GB). You can stream live progress:
 
 ```bash
 ./scripts/manage.sh logs
@@ -113,7 +113,7 @@ Your server and both Headless Clients are live!
 
 ## Client Connection & Mod Sync
 
-Joining players can synchronize all 6 required mods in seconds:
+Joining players can synchronize all 7 required mods in seconds:
 
 1. Send the [configs/preset.html](file:///home/jcee-slave/ArmaA/configs/preset.html) file to your players.
 2. In the official **Arma 3 Launcher**:
@@ -127,6 +127,7 @@ Joining players can synchronize all 6 required mods in seconds:
    - *RHS: Gendarmerie and Rebel Equipment* (ID: `843593391`)
    - *RHS: Serbian Armed Forces* (ID: `843632231`)
    - *Antistasi The Mod - Ultimate* (ID: `3020755032`)
+   - *Remove stamina* (ID: `632435682`)
 4. Players launch Arma 3 with the preset loaded, go to **Server Browser** &rarr; **Direct Connect**, and enter your server IP and port `2302`.
 
 ---

@@ -98,12 +98,12 @@ cmd_steam_login() {
     echo ""
     if [ -n "$guard_code" ]; then
         echo "Authenticating using provided Steam Guard code: ${guard_code}..."
-        docker compose run --rm -e STEAM_GUARD_CODE="$guard_code" arma3 bash -c 'exec /steamcmd/steamcmd.sh +@sSteamCmdForcePlatformType linux +login "$STEAM_USER" "$STEAM_PASSWORD" "$STEAM_GUARD_CODE" +quit'
+        docker compose run --rm -e STEAM_GUARD_CODE="$guard_code" arma3 FEX /bin/bash -c 'exec /steamcmd/steamcmd.sh +@sSteamCmdForcePlatformType linux +login "$STEAM_USER" "$STEAM_PASSWORD" "$STEAM_GUARD_CODE" +quit'
     else
         echo "Launching interactive SteamCMD login session..."
         echo "When prompted for 'Steam Guard code:', check your email or authenticator app and enter the code."
         echo ""
-        docker compose run --rm -it arma3 bash -c 'exec /steamcmd/steamcmd.sh +@sSteamCmdForcePlatformType linux +login "$STEAM_USER" "$STEAM_PASSWORD" +quit'
+        docker compose run --rm -it arma3 FEX /bin/bash -c 'exec /steamcmd/steamcmd.sh +@sSteamCmdForcePlatformType linux +login "$STEAM_USER" "$STEAM_PASSWORD" +quit'
     fi
     echo ""
     echo "=== Authentication Session Saved ==="

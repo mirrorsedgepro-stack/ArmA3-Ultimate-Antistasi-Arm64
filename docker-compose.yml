@@ -26,7 +26,7 @@ services:
       - orange:/arma3/orange
 
       # Persistent storage for SteamCMD and downloaded Steam Workshop mods
-      - steamcmd:/steamcmd
+      - steamcmd_fex:/steamcmd
       - workshop:/arma3/steamapps
 
       # Persistent storage for Steam credentials, session tokens, and Steam Guard
@@ -44,7 +44,7 @@ volumes:
   heli:
   jets:
   orange:
-  steamcmd:
+  steamcmd_fex:
   workshop:
   steam_data:
   steam_root:

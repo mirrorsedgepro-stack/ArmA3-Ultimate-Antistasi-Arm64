@@ -1,38 +1,46 @@
-# Patched Box64 for the Arma engine: upstream makecontext() truncates fiber
-# arguments to 32 bits, which segfaults arma3server_x64 at mission init.
-FROM debian:trixie AS box64-build
-ARG BOX64_COMMIT=e5afb47da8b880e8cee73816ed51b0f811dc513b
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends git ca-certificates cmake make gcc g++ python3 && \
-    rm -rf /var/lib/apt/lists/*
-COPY container_src/box64-makecontext-64bit.patch /tmp/
-RUN git clone https://github.com/ptitSeb/box64.git /box64 && \
-    cd /box64 && git checkout "$BOX64_COMMIT" && \
-    git apply /tmp/box64-makecontext-64bit.patch && \
-    cmake -B build -DARM64=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo && \
-    cmake --build build -j"$(nproc)" --target box64
-
-FROM ghcr.io/sonroyaalmerol/steamcmd-arm64:latest
-
-USER root
-
-# SteamCMD keeps the base image's Box64; the Arma server and HCs use the patched one
-COPY --from=box64-build /box64/build/box64 /usr/local/bin/box64-arma
-
-# Install Python 3 and system utilities
-RUN apt-get update && \
+# x86_64 userland that FEX-Emu runs launch.py, SteamCMD, the server and the
+# HCs in. Building this stage on an ARM64 host needs amd64 binfmt emulation
+# (scripts/setup_binfmt.sh registers QEMU for it).
+FROM --platform=linux/amd64 debian:trixie-slim AS x86-rootfs
+RUN dpkg --add-architecture i386 && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
         python3 \
         procps \
         curl \
-        ca-certificates && \
-    apt-get clean && \
+        ca-certificates \
+        libgcc-s1 \
+        libc6:i386 \
+        lib32gcc-s1 \
+        lib32stdc++6 && \
     rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /steamcmd && \
+    curl -fsSL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz | tar -xz -C /steamcmd
 
-# Configure Box64 and SteamCMD environment
-ENV STEAM_PLATFORM=linux64 \
-    DEBUGGER=/usr/local/bin/box64 \
-    ARMA_BOX64=/usr/local/bin/box64-arma \
+# ARM64 host side: FEX-Emu emulates the whole x86 userland (real x86 glibc),
+# unlike Box64, whose partial makecontext/swapcontext emulation deadlocks
+# Arma's script fibers when Antistasi starts a new campaign.
+FROM ubuntu:24.04
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends software-properties-common gpg-agent && \
+    add-apt-repository -y ppa:fex-emu/fex && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends fex-emu-armv8.4 && \
+    apt-get purge -y software-properties-common gpg-agent && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/* && \
+    rm -f /etc/machine-id /var/lib/dbus/machine-id
+
+# FEX resolves guest paths in the RootFS first and falls back to the host, so
+# drop everything that must come from the container or its volumes instead
+COPY --from=x86-rootfs / /opt/x86-rootfs
+RUN mv /opt/x86-rootfs/steamcmd /steamcmd && \
+    rm -rf /opt/x86-rootfs/etc/resolv.conf /opt/x86-rootfs/etc/hosts /opt/x86-rootfs/etc/hostname \
+           /opt/x86-rootfs/root /opt/x86-rootfs/tmp /opt/x86-rootfs/home && \
+    mkdir -p /arma3
+
+ENV FEX_ROOTFS=/opt/x86-rootfs \
     ARMA_BINARY=./arma3server_x64 \
     ARMA_CONFIG=main.cfg \
     ARMA_PARAMS="" \
@@ -50,12 +58,6 @@ ENV STEAM_PLATFORM=linux64 \
     MODS_PRESET="" \
     SKIP_INSTALL=false
 
-# Create directories and wrapper script for steamcmd
-RUN mkdir -p /arma3 /steamcmd && \
-    printf '#!/usr/bin/env bash\nexport STEAM_PLATFORM=linux64\nexport DEBUGGER=/usr/local/bin/box64\nexec /home/steam/steamcmd/steamcmd.sh "$@"\n' > /steamcmd/steamcmd.sh && \
-    chmod +x /steamcmd/steamcmd.sh && \
-    ln -sf /steamcmd/steamcmd.sh /usr/local/bin/steamcmd
-
 # Copy orchestration scripts
 COPY container_src/launch.py /launch.py
 COPY container_src/workshop.py /workshop.py
@@ -64,4 +66,5 @@ COPY container_src/keys.py /keys.py
 
 WORKDIR /arma3
 
-CMD ["python3", "/launch.py"]
+# Everything below launch.py (SteamCMD, server, HCs) inherits FEX via execve
+CMD ["FEX", "/usr/bin/python3", "/launch.py"]

@@ -27,7 +27,7 @@ if not os.path.isdir(KEYS):
     os.makedirs(KEYS)
 
 if os.environ.get("SKIP_INSTALL", "false") in ["", "false"]:
-    raw_bin_check = os.environ.get("ARMA_BINARY", "./arma3server_x64").replace("box64", "").strip()
+    raw_bin_check = os.environ.get("ARMA_BINARY", "./arma3server_x64").strip()
     if not os.path.exists(raw_bin_check):
         print("\n=======================================================", flush=True)
         print("Downloading Arma 3 Dedicated Server files (AppID 233780)...", flush=True)
@@ -92,10 +92,8 @@ if os.environ["MODS_LOCAL"] == "true" and os.path.exists("mods"):
     mods.extend(local.mods("mods"))
 
 binary = os.environ["ARMA_BINARY"]
-if os.uname().machine in ["aarch64", "arm64"] and not binary.strip().startswith("box64"):
-    binary = "{} {}".format(os.environ.get("ARMA_BOX64", "box64"), binary)
 
-raw_bin = os.environ["ARMA_BINARY"].replace("box64", "").strip()
+raw_bin = binary.strip()
 if not os.path.exists(raw_bin):
     print("\n=======================================================", flush=True)
     print(f"FATAL ERROR: Arma 3 server binary '{raw_bin}' not found in /arma3!", flush=True)
@@ -169,7 +167,14 @@ if clients != 0:
             hc_name, hc_name
         )
         print("LAUNCHING ARMA CLIENT {} WITH".format(i), client_launch + hc_args)
-        subprocess.Popen(client_launch + hc_password + hc_args, shell=True)
+        # Relaunch HCs that exit so the server gets its AI offload back
+        # (Antistasi re-registers reconnecting HCs)
+        subprocess.Popen(
+            "while true; do {}; echo \"HC {} exited with code $?, relaunching in 15s\"; sleep 15; done".format(
+                client_launch + hc_password + hc_args, i
+            ),
+            shell=True,
+        )
 
 launch += ' -port={} -name="{}" -profiles="/arma3/configs/profiles"'.format(
     os.environ["PORT"], os.environ["ARMA_PROFILE"]
