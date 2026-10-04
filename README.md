@@ -10,7 +10,7 @@ A production-ready Docker containerization setup for hosting a 32-player **Antis
 - **Architecture Support:** ARM64 (`aarch64`) hosts. Building the image needs amd64 emulation for the x86 userland stage, which `./scripts/manage.sh start` sets up automatically.
 - **Mission Framework:** [Antistasi Ultimate](https://steamcommunity.com/sharedfiles/filedetails/?id=3020755032) mod edition on Altis.
 - **Modset:** RHS Escalation suite (AFRF, USAF, GREF, SAF) + CBA_A3.
-- **Headless Clients (HCs):** 2 containerized Headless Clients automatically connected via loopback to distribute AI garrisons, patrols, and QRFs across dedicated CPU cores.
+- **Headless Clients (HCs):** 3 containerized Headless Clients automatically connected via loopback to distribute AI garrisons, patrols, and QRFs across dedicated CPU cores.
 - **Engine Tuning:** 64-bit binary (`arma3server_x64`), 60 FPS tickrate cap, and high-throughput `basic.cfg` network tuning (2048 msgs/tick, 1 Gbps max bandwidth).
 - **Campaign Persistence:** Automated campaign state resumption (`autoLoadLastGame = 60`) with dedicated automated backup and restore scripts.
 - **Client Sync:** Pre-generated `configs/preset.html` for 1-click mod synchronization in the official Arma 3 Launcher.
@@ -95,7 +95,7 @@ This runs pre-flight checks (verifying `.env` and configuring `binfmt` on ARM64 
 
 ### 4. Follow Initial Startup & Mod Downloads
 
-On first launch, SteamCMD will download the Arma 3 server binary (~5 GB) and all 7 Workshop mods (~25 GB). You can stream live progress:
+On first launch, SteamCMD will download the Arma 3 server binary (~5 GB) and all 42 Workshop mods (~30 GB). You can stream live progress:
 
 ```bash
 ./scripts/manage.sh logs
@@ -106,28 +106,22 @@ Once you see:
 LAUNCHING ARMA SERVER WITH ./arma3server_x64 ...
 LAUNCHING ARMA CLIENT 0 WITH ...
 LAUNCHING ARMA CLIENT 1 WITH ...
+LAUNCHING ARMA CLIENT 2 WITH ...
 ```
-Your server and both Headless Clients are live!
+Your server and all Headless Clients are live!
 
 ---
 
 ## Client Connection & Mod Sync
 
-Joining players can synchronize all 7 required mods in seconds:
+Joining players can synchronize all 42 required mods in seconds:
 
 1. Send the [configs/preset.html](file:///home/jcee-slave/ArmaA/configs/preset.html) file to your players.
 2. In the official **Arma 3 Launcher**:
    - Navigate to the **Mods** tab.
    - Click **Preset** (top right) &rarr; **Import**.
    - Select `preset.html`.
-3. The launcher will automatically prompt players to subscribe to and download any missing mods from the Steam Workshop:
-   - *CBA_A3* (ID: `450814997`)
-   - *RHS: Armed Forces of the Russian Federation* (ID: `843425103`)
-   - *RHS: United States Armed Forces* (ID: `843577117`)
-   - *RHS: Gendarmerie and Rebel Equipment* (ID: `843593391`)
-   - *RHS: Serbian Armed Forces* (ID: `843632231`)
-   - *Antistasi The Mod - Ultimate* (ID: `3020755032`)
-   - *Remove stamina* (ID: `632435682`)
+3. The launcher will automatically prompt players to subscribe to and download any missing mods from the Steam Workshop. The full modset (RHS, Antistasi Ultimate, ACE, JSRS, Blastcore and the rest) is listed in `configs/preset.html`, the single source of truth for the server's mods.
 4. Players launch Arma 3 with the preset loaded, go to **Server Browser** &rarr; **Direct Connect**, and enter your server IP and port `2302`.
 
 ---
@@ -160,7 +154,7 @@ sudo ufw allow 2302:2306/udp
 | `./scripts/manage.sh restart` | Restart the server |
 | `./scripts/manage.sh status` | View container status, CPU/RAM usage, and active ports |
 | `./scripts/manage.sh logs` | Follow live server console output |
-| `./scripts/manage.sh hc` | Verify status of the 2 Headless Client worker processes |
+| `./scripts/manage.sh hc` | Verify status of the 3 Headless Client worker processes |
 | `./scripts/manage.sh fps` | Monitor live server tickrate / FPS |
 | `./scripts/manage.sh backup` | Manually trigger a compressed campaign save backup |
 | `./scripts/manage.sh restore` | Interactively restore campaign state from a backup |

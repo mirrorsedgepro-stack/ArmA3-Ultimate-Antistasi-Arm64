@@ -35,6 +35,33 @@ def is_mod_downloaded(mod_id):
     return False
 
 
+def run_steamcmd(commands):
+    """Run SteamCMD commands as STEAM_USER, preferring the cached session.
+
+    Logging in with the password always starts a fresh login (a Steam Guard
+    prompt on 2FA accounts) and discards the session cached by
+    `manage.sh steam-login`, so log in with the username alone first and only
+    fall back to the password when no usable session is cached.
+    """
+    base = ["/steamcmd/steamcmd.sh", "+@sSteamCmdForcePlatformType", "linux"]
+    user = os.environ["STEAM_USER"]
+    if env_defined("STEAM_GUARD_CODE"):
+        code = os.environ["STEAM_GUARD_CODE"].strip()
+        login = ["+set_steam_guard_code", code, "+force_install_dir", "/arma3",
+                 "+login", user, os.environ["STEAM_PASSWORD"], code]
+        return subprocess.call(base + login + commands + ["+quit"])
+
+    cached = ["+force_install_dir", "/arma3", "+login", user]
+    res = subprocess.call(base + cached + commands + ["+quit"], stdin=subprocess.DEVNULL)
+    if res == 0:
+        return res
+    print(f"\n[!] Cached Steam login unavailable (SteamCMD exited with code {res}); "
+          "falling back to password login.", flush=True)
+    print("[!] To avoid Steam Guard prompts here, run: ./scripts/manage.sh steam-login <code>\n", flush=True)
+    password = ["+force_install_dir", "/arma3", "+login", user, os.environ["STEAM_PASSWORD"]]
+    return subprocess.call(base + password + commands + ["+quit"])
+
+
 def download(mods):
     missing_mods = [m for m in mods if not is_mod_downloaded(m)]
     for m in mods:
@@ -50,20 +77,11 @@ def download(mods):
     print("If prompted, please confirm login ONCE on your Steam Mobile app.", flush=True)
     print(f"=======================================================\n", flush=True)
 
-    steamcmd = ["/steamcmd/steamcmd.sh"]
-    steamcmd.extend(["+@sSteamCmdForcePlatformType", "linux"])
-    if env_defined("STEAM_GUARD_CODE"):
-        steamcmd.extend(["+set_steam_guard_code", os.environ["STEAM_GUARD_CODE"].strip()])
-    steamcmd.extend(["+force_install_dir", "/arma3"])
-    if env_defined("STEAM_GUARD_CODE"):
-        steamcmd.extend(["+login", os.environ["STEAM_USER"], os.environ["STEAM_PASSWORD"], os.environ["STEAM_GUARD_CODE"].strip()])
-    else:
-        steamcmd.extend(["+login", os.environ["STEAM_USER"], os.environ["STEAM_PASSWORD"]])
+    commands = []
     for mod_id in missing_mods:
-        steamcmd.extend(["+workshop_download_item", "107410", mod_id, "validate"])
-    steamcmd.extend(["+quit"])
+        commands.extend(["+workshop_download_item", "107410", mod_id, "validate"])
 
-    res = subprocess.call(steamcmd)
+    res = run_steamcmd(commands)
     if res != 0:
         print(f"\n[!] WARNING: SteamCMD workshop download exited with code {res}", flush=True)
         raise RuntimeError(f"SteamCMD workshop download exited with code {res}")

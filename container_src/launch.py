@@ -32,16 +32,7 @@ if os.environ.get("SKIP_INSTALL", "false") in ["", "false"]:
         print("\n=======================================================", flush=True)
         print("Downloading Arma 3 Dedicated Server files (AppID 233780)...", flush=True)
         print("=======================================================\n", flush=True)
-        steamcmd = ["/steamcmd/steamcmd.sh"]
-        steamcmd.extend(["+@sSteamCmdForcePlatformType", "linux"])
-        if env_defined("STEAM_GUARD_CODE"):
-            steamcmd.extend(["+set_steam_guard_code", os.environ["STEAM_GUARD_CODE"].strip()])
-        steamcmd.extend(["+force_install_dir", "/arma3"])
-        if env_defined("STEAM_GUARD_CODE"):
-            steamcmd.extend(["+login", os.environ["STEAM_USER"], os.environ["STEAM_PASSWORD"], os.environ["STEAM_GUARD_CODE"].strip()])
-        else:
-            steamcmd.extend(["+login", os.environ["STEAM_USER"], os.environ["STEAM_PASSWORD"]])
-        steamcmd.extend(["+app_update", "233780"])
+        steamcmd = ["+app_update", "233780"]
         if env_defined("STEAM_BRANCH"):
             steamcmd.extend(["-beta", os.environ["STEAM_BRANCH"]])
         if env_defined("STEAM_BRANCH_PASSWORD"):
@@ -51,13 +42,9 @@ if os.environ.get("SKIP_INSTALL", "false") in ["", "false"]:
             for depot in os.environ["STEAM_ADDITIONAL_DEPOT"].split("|"):
                 depot_parts = depot.split(",")
                 steamcmd.extend(
-                    ["+login", os.environ["STEAM_USER"], os.environ["STEAM_PASSWORD"]]
-                )
-                steamcmd.extend(
                     ["+download_depot", "233780", depot_parts[0], depot_parts[1]]
                 )
-        steamcmd.extend(["+quit"])
-        res = subprocess.call(steamcmd)
+        res = workshop.run_steamcmd(steamcmd)
         if res != 0:
             print(f"\n[!] FATAL: SteamCMD server installation exited with code {res}", flush=True)
             print("[!] If Steam Guard was prompted, logon denied, or rate-limited:", flush=True)
