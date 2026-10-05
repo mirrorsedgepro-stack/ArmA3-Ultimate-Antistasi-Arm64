@@ -26,6 +26,11 @@ Commands:
   restore        Restore an Antistasi campaign save from an existing backup
   hc             Inspect status of Headless Clients
   fps            Monitor server tickrate / FPS from game logs
+  bot-start      Start / deploy the Discord Bot service
+  bot-stop       Stop the Discord Bot service
+  bot-logs       Follow live logs from the Discord Bot service
+  telemetry      Test telemetry bridge endpoint (port 2310)
+  telemetry-logs Follow live logs from the Telemetry Bridge service
   help           Display this help message
 EOF
 }
@@ -85,8 +90,14 @@ cmd_status() {
 }
 
 cmd_logs() {
-    echo "Streaming logs from ${CONTAINER_NAME} (Ctrl+C to exit)..."
-    docker compose logs -f --tail=100
+    local target="${1:-}"
+    if [ -n "$target" ]; then
+        echo "Streaming logs from $target (Ctrl+C to exit)..."
+        docker compose logs -f --tail=100 "$target"
+    else
+        echo "Streaming logs from all containers (Ctrl+C to exit)..."
+        docker compose logs -f --tail=100
+    fi
 }
 
 cmd_steam_login() {
@@ -151,7 +162,7 @@ case "$COMMAND" in
         cmd_status
         ;;
     logs)
-        cmd_logs
+        cmd_logs "$@"
         ;;
     steam-login|login)
         cmd_steam_login "$@"
@@ -167,6 +178,26 @@ case "$COMMAND" in
         ;;
     fps)
         cmd_fps
+        ;;
+    bot-start|bot)
+        echo "Starting Discord Bot service..."
+        docker compose up -d discord_bot
+        echo "Bot service started. Run './scripts/manage.sh bot-logs' to view logs."
+        ;;
+    bot-stop)
+        echo "Stopping Discord Bot service..."
+        docker compose stop discord_bot
+        echo "Bot service stopped."
+        ;;
+    bot-logs)
+        docker compose logs -f --tail=100 discord_bot
+        ;;
+    telemetry)
+        echo "=== Testing Telemetry Bridge Endpoint (http://127.0.0.1:2310/api/telemetry) ==="
+        curl -s http://127.0.0.1:2310/api/telemetry | jq . || curl -i http://127.0.0.1:2310/api/telemetry
+        ;;
+    telemetry-logs)
+        docker compose logs -f --tail=100 telemetry_bridge
         ;;
     help|--help|-h)
         usage
