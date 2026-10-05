@@ -1,380 +1,601 @@
 #!/usr/bin/env python3
 """
-Arma 3 Dedicated Server Telemetry Bridge
-Exposes real-time A2S query data, server FPS, Antistasi metrics, and HC status
-over HTTP for the ArmA3-Monitor Vercel frontend.
+Arma 3 Dedicated Server Telemetry Bridge (for ArmA3-Monitor on Vercel).
+
+Every value served here is observed, never invented:
+  * Live status / player list ...... Valve A2S query against the local server.
+  * Server FPS + Antistasi stats ... A3A_fnc_logPerformance lines in the container
+                                     log. Antistasi only logs these while players
+                                     are connected, so each sample carries its
+                                     timestamp and the API reports its age.
+  * Headless clients ............... Antistasi addHC / onHeadlessClientDisconnect
+                                     log events.
+  * Player sessions / history ...... "Player X connected (id=...)" /
+                                     "Player X disconnected." engine log lines,
+                                     persisted to /data so they survive restarts.
+  * Server settings ................ Parsed from the mounted configs/main.cfg.
+
+When something is unknown the field is null; the frontend must show "unknown".
 """
 
-import os
-import sys
-import time
 import json
+import os
 import re
 import socket
 import struct
+import sys
+import threading
+import time
 from datetime import datetime, timezone
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 HOST = os.environ.get("TELEMETRY_HOST", "0.0.0.0")
 PORT = int(os.environ.get("TELEMETRY_PORT", "2310"))
 A2S_HOST = os.environ.get("A2S_HOST", "127.0.0.1")
 A2S_PORT = int(os.environ.get("A2S_PORT", "2303"))
 GAME_PORT = int(os.environ.get("PORT", "2302"))
+PUBLIC_IP = os.environ.get("SERVER_PUBLIC_IP", "")
 API_KEY = os.environ.get("TELEMETRY_API_KEY", "").strip()
 DOCKER_SOCKET = os.environ.get("DOCKER_SOCKET", "/var/run/docker.sock")
-CONTAINER_NAME = os.environ.get("ARMA_CONTAINER_NAME", "arma3_antistasi")
+CONTAINER = os.environ.get("ARMA_CONTAINER_NAME", "arma3_antistasi")
 EXPECTED_HCS = int(os.environ.get("HEADLESS_CLIENTS", "3"))
+MAIN_CFG = os.environ.get("ARMA_MAIN_CFG", "/config/main.cfg")
+DATA_DIR = os.environ.get("TELEMETRY_DATA_DIR", "/data")
+SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")
 
-CACHE_TTL_SEC = 2.0
-_cache = {
-    "timestamp": 0.0,
-    "data": None
-}
+A2S_CACHE_SEC = 3.0
 
 
-def read_cstring(data: bytes, offset: int):
+def now_utc():
+    return datetime.now(timezone.utc)
+
+
+def iso(dt):
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if dt else None
+
+
+def parse_docker_ts(ts):
+    # 2026-10-05T19:13:18.123456789Z -> aware datetime (truncate to microseconds)
+    m = re.match(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?Z", ts)
+    if not m:
+        return None
+    frac = (m.group(2) or ".0")[:7]
+    return datetime.strptime(m.group(1) + frac, "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Docker Engine API (unix socket, HTTP/1.0 so responses are never chunked)
+# ---------------------------------------------------------------------------
+def docker_request(path, timeout=5.0):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    s.connect(DOCKER_SOCKET)
+    s.sendall(f"GET {path} HTTP/1.0\r\nHost: docker\r\n\r\n".encode())
+    return s
+
+
+def docker_json(path):
+    s = docker_request(path)
+    buf = b""
+    try:
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    finally:
+        s.close()
+    head, _, body = buf.partition(b"\r\n\r\n")
+    status = head.split(b"\r\n", 1)[0]
+    if b" 200 " not in status:
+        raise RuntimeError(f"docker {path}: {status.decode(errors='replace')}")
+    return json.loads(body)
+
+
+def container_started_at():
+    try:
+        info = docker_json(f"/containers/{CONTAINER}/json")
+        state = info.get("State", {})
+        if not state.get("Running"):
+            return None
+        return parse_docker_ts(state.get("StartedAt", ""))
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Persistent session store
+# ---------------------------------------------------------------------------
+class SessionStore:
+    """Player sessions keyed by (uid, connectedAt) so log replays are idempotent."""
+
+    def __init__(self, path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.sessions = {}  # key -> dict(name, uid, connectedAt, disconnectedAt)
+        self._dirty = False
+        self._load()
+
+    def _load(self):
+        try:
+            with open(self.path) as f:
+                for s in json.load(f):
+                    self.sessions[f"{s['uid']}|{s['connectedAt']}"] = s
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            print(f"[sessions] could not load {self.path}: {e}", file=sys.stderr)
+
+    def save(self):
+        with self.lock:
+            if not self._dirty:
+                return
+            data = sorted(self.sessions.values(), key=lambda s: s["connectedAt"])
+            self._dirty = False
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, self.path)
+
+    def connect(self, name, uid, ts):
+        key = f"{uid}|{iso(ts)}"
+        with self.lock:
+            # A reconnect without a disconnect line closes the stale session.
+            for s in self.sessions.values():
+                if s["uid"] == uid and s["disconnectedAt"] is None and s["connectedAt"] < iso(ts):
+                    s["disconnectedAt"] = iso(ts)
+                    self._dirty = True
+            if key not in self.sessions:
+                self.sessions[key] = {"name": name, "uid": uid, "connectedAt": iso(ts), "disconnectedAt": None}
+                self._dirty = True
+
+    def disconnect(self, name, ts):
+        with self.lock:
+            open_ = [s for s in self.sessions.values()
+                     if s["name"] == name and s["disconnectedAt"] is None and s["connectedAt"] <= iso(ts)]
+            for s in open_:
+                s["disconnectedAt"] = iso(ts)
+                self._dirty = True
+
+    def close_all_open(self, ts):
+        with self.lock:
+            for s in self.sessions.values():
+                if s["disconnectedAt"] is None and s["connectedAt"] <= iso(ts):
+                    s["disconnectedAt"] = iso(ts)
+                    self._dirty = True
+
+    def snapshot(self):
+        with self.lock:
+            return [dict(s) for s in self.sessions.values()]
+
+
+SESSIONS = SessionStore(SESSIONS_FILE)
+
+
+# ---------------------------------------------------------------------------
+# Log follower: FPS, Antistasi stats, HCs, player sessions
+# ---------------------------------------------------------------------------
+class LogState:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.reset()
+        self.follower_ok = False
+        self.follower_error = None
+
+    def reset(self):
+        self.perf = None            # dict incl. sampledAt
+        self.hc_ids = []            # Antistasi HC owner IDs currently registered
+        self.hc_updated_at = None
+        self.last_log_at = None
+
+
+LOG = LogState()
+
+RE_LINE = re.compile(r"^(\S+Z) (.*)$")
+RE_PERF = re.compile(
+    r"A3A_fnc_logPerformance \|\s+ServerFPS=([\d.]+)\s+Players=(\d+)\s+DeadUnits=(\d+)\s+AllUnits=(\d+)"
+    r".*?AllVehicles=(\d+).*?FactionCash=(\d+)\s+HR=(\d+)\s+OccAggro=(\d+)\s+InvAggro=(\d+)\s+Warlevel=(\d+)"
+)
+RE_HC_ADD = re.compile(r"A3A_fnc_addHC \| Headless Client Connected: \[([\d,\s]*)\]")
+RE_HC_DEL = re.compile(r"Headless client ID (\d+) disconnected from HC array \[([\d,\s]*)\]")
+RE_CONNECT = re.compile(r"^\s*\d{1,2}:\d\d:\d\d Player (.+) connected \(id=([^)]+)\)\.\s*$")
+RE_DISCONNECT = re.compile(r"^\s*\d{1,2}:\d\d:\d\d Player (.+) disconnected\.\s*$")
+RE_SERVER_START = re.compile(r"Dedicated host created\.")
+
+
+def ids(s):
+    return [int(x) for x in re.findall(r"\d+", s)]
+
+
+def handle_line(ts, text):
+    with LOG.lock:
+        LOG.last_log_at = ts
+
+    if RE_SERVER_START.search(text):
+        # Server process restarted: nobody is connected, HC registrations are gone.
+        SESSIONS.close_all_open(ts)
+        with LOG.lock:
+            LOG.hc_ids = []
+            LOG.hc_updated_at = ts
+        return
+
+    m = RE_PERF.search(text)
+    if m:
+        with LOG.lock:
+            LOG.perf = {
+                "serverFps": round(float(m.group(1)), 1),
+                # Antistasi's "Players" includes headless clients.
+                "connectedClientsInclHCs": int(m.group(2)),
+                "deadUnits": int(m.group(3)),
+                "allUnits": int(m.group(4)),
+                "allVehicles": int(m.group(5)),
+                "factionCash": int(m.group(6)),
+                "hr": int(m.group(7)),
+                "occAggro": int(m.group(8)),
+                "invAggro": int(m.group(9)),
+                "warLevel": int(m.group(10)),
+                "sampledAt": ts,
+            }
+        return
+
+    m = RE_HC_ADD.search(text)
+    if m:
+        with LOG.lock:
+            LOG.hc_ids = ids(m.group(1))
+            LOG.hc_updated_at = ts
+        return
+
+    m = RE_HC_DEL.search(text)
+    if m:
+        gone, arr = int(m.group(1)), ids(m.group(2))
+        with LOG.lock:
+            LOG.hc_ids = [i for i in arr if i != gone]
+            LOG.hc_updated_at = ts
+        return
+
+    m = RE_CONNECT.match(text)
+    if m:
+        name, uid = m.group(1), m.group(2)
+        if not uid.startswith("HC"):  # headless clients connect with id=HC<n>
+            SESSIONS.connect(name, uid, ts)
+        return
+
+    m = RE_DISCONNECT.match(text)
+    if m:
+        SESSIONS.disconnect(m.group(1), ts)
+
+
+def follow_logs_forever():
+    """Stream the container log (from the start, then follow). Reconnects on exit."""
+    while True:
+        try:
+            with LOG.lock:
+                LOG.reset()
+            s = docker_request(
+                f"/containers/{CONTAINER}/logs?follow=1&stdout=1&stderr=1&timestamps=1&tail=all",
+                timeout=None,
+            )
+            s.settimeout(None)
+            f = s.makefile("rb")
+            # HTTP headers
+            status = f.readline()
+            if b" 200 " not in status:
+                raise RuntimeError(status.decode(errors="replace").strip())
+            while f.readline() not in (b"\r\n", b"\n", b""):
+                pass
+            LOG.follower_ok = True
+            LOG.follower_error = None
+            pending = b""
+            last_save = time.time()
+            while True:
+                header = f.read(8)
+                if len(header) < 8:
+                    break
+                if header[0] in (0, 1, 2) and header[1:4] == b"\x00\x00\x00":
+                    size = struct.unpack(">I", header[4:8])[0]
+                    payload = f.read(size)
+                else:  # TTY container: raw stream
+                    payload = header + f.readline()
+                pending += payload
+                *lines, pending = pending.split(b"\n")
+                for raw in lines:
+                    line = raw.decode("utf-8", errors="replace").rstrip("\r")
+                    m = RE_LINE.match(line)
+                    if not m:
+                        continue
+                    ts = parse_docker_ts(m.group(1))
+                    if ts:
+                        handle_line(ts, m.group(2))
+                if time.time() - last_save > 10:
+                    SESSIONS.save()
+                    last_save = time.time()
+            SESSIONS.save()
+        except Exception as e:
+            LOG.follower_error = str(e)
+            print(f"[logs] follower error: {e}", file=sys.stderr)
+        LOG.follower_ok = False
+        time.sleep(10)
+
+
+# ---------------------------------------------------------------------------
+# A2S
+# ---------------------------------------------------------------------------
+def read_cstring(data, offset):
     end = data.find(b"\x00", offset)
     if end == -1:
         return data[offset:].decode("utf-8", errors="replace"), len(data)
     return data[offset:end].decode("utf-8", errors="replace"), end + 1
 
 
+def a2s_request(sock, payload):
+    sock.sendto(payload, (A2S_HOST, A2S_PORT))
+    res, _ = sock.recvfrom(65535)
+    if res[4:5] == b"\x41":  # challenge
+        chal = res[5:9]
+        if payload[4:5] == b"\x54":
+            sock.sendto(payload + chal, (A2S_HOST, A2S_PORT))
+        else:
+            sock.sendto(payload[:5] + chal, (A2S_HOST, A2S_PORT))
+        res, _ = sock.recvfrom(65535)
+    return res
+
+
 def query_a2s():
-    """Queries Valve A2S_INFO and A2S_PLAYER via UDP."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(2.0)
-    start_time = time.perf_counter()
-
-    info = {}
-    players_raw = []
-
     try:
-        # 1. A2S_INFO
-        info_req = b"\xff\xff\xff\xff\x54Source Engine Query\x00"
-        sock.sendto(info_req, (A2S_HOST, A2S_PORT))
-        res, _ = sock.recvfrom(4096)
-        ping_ms = round((time.perf_counter() - start_time) * 1000)
+        t0 = time.perf_counter()
+        res = a2s_request(sock, b"\xff\xff\xff\xff\x54Source Engine Query\x00")
+        ping = round((time.perf_counter() - t0) * 1000)
+        if res[4:5] != b"\x49":
+            raise ValueError("bad A2S_INFO reply")
+        i = 6
+        name, i = read_cstring(res, i)
+        map_name, i = read_cstring(res, i)
+        _folder, i = read_cstring(res, i)
+        mission, i = read_cstring(res, i)
+        i += 2
+        players, max_players, _bots = res[i], res[i + 1], res[i + 2]
+        i += 5
+        visibility, vac = res[i], res[i + 1]
+        i += 2
+        version, i = read_cstring(res, i)
 
-        # Handle challenge response (0x41)
-        if res.startswith(b"\xff\xff\xff\xff\x41"):
-            challenge = res[5:9]
-            sock.sendto(info_req + challenge, (A2S_HOST, A2S_PORT))
-            res, _ = sock.recvfrom(4096)
-
-        if not res.startswith(b"\xff\xff\xff\xff\x49"):
-            raise ValueError(f"Invalid A2S_INFO header: {res[:5]!r}")
-
-        idx = 5
-        _proto = res[idx]; idx += 1
-        name, idx = read_cstring(res, idx)
-        map_name, idx = read_cstring(res, idx)
-        folder, idx = read_cstring(res, idx)
-        game, idx = read_cstring(res, idx)
-        _steam_id = struct.unpack("<H", res[idx:idx+2])[0]; idx += 2
-        players_count = res[idx]; idx += 1
-        max_players = res[idx]; idx += 1
-        _bots = res[idx]; idx += 1
-        _server_type = chr(res[idx]); idx += 1
-        _env = chr(res[idx]); idx += 1
-        visibility = res[idx]; idx += 1
-        vac = res[idx]; idx += 1
-        version, idx = read_cstring(res, idx)
-
-        info = {
-            "name": name,
-            "map": map_name,
-            "mission": game,
-            "gameType": folder,
-            "version": version,
-            "rawPlayers": players_count,
-            "maxPlayers": max_players,
-            "battleye": bool(vac),
-            "passwordProtected": bool(visibility),
-            "ping": ping_ms,
+        roster = []
+        pres = a2s_request(sock, b"\xff\xff\xff\xff\x55\xff\xff\xff\xff")
+        if pres[4:5] == b"\x44":
+            j = 6
+            for _ in range(pres[5]):
+                if j >= len(pres):
+                    break
+                j += 1
+                pname, j = read_cstring(pres, j)
+                if j + 8 > len(pres):
+                    break
+                score = struct.unpack("<i", pres[j:j + 4])[0]
+                dur = struct.unpack("<f", pres[j + 4:j + 8])[0]
+                j += 8
+                if pname.strip():
+                    roster.append({"name": pname, "score": score, "timePlayedSeconds": int(dur)})
+        return {
+            "ok": True, "name": name, "map": map_name, "mission": mission, "version": version,
+            "rawPlayerCount": players, "maxPlayers": max_players, "passwordProtected": bool(visibility),
+            "battleye": bool(vac), "ping": ping, "roster": roster,
         }
-
-        # 2. A2S_PLAYER
-        p_req = b"\xff\xff\xff\xff\x55\xff\xff\xff\xff"
-        sock.sendto(p_req, (A2S_HOST, A2S_PORT))
-        p_res, _ = sock.recvfrom(4096)
-
-        if p_res.startswith(b"\xff\xff\xff\xff\x41"):
-            p_chal = p_res[5:9]
-            sock.sendto(b"\xff\xff\xff\xff\x55" + p_chal, (A2S_HOST, A2S_PORT))
-            p_res, _ = sock.recvfrom(4096)
-
-        if p_res.startswith(b"\xff\xff\xff\xff\x44"):
-            num_players = p_res[5]
-            p_idx = 6
-            for p_num in range(num_players):
-                if p_idx >= len(p_res):
-                    break
-                _slot = p_res[p_idx]; p_idx += 1
-                p_name, p_idx = read_cstring(p_res, p_idx)
-                if p_idx + 8 > len(p_res):
-                    break
-                p_score = struct.unpack("<i", p_res[p_idx:p_idx+4])[0]; p_idx += 4
-                p_dur = struct.unpack("<f", p_res[p_idx:p_idx+4])[0]; p_idx += 4
-                players_raw.append({
-                    "id": p_num + 1,
-                    "name": p_name,
-                    "score": p_score,
-                    "timePlayedSeconds": int(p_dur),
-                })
-
-        return True, info, players_raw
     except Exception as e:
-        return False, {"error": str(e)}, []
+        return {"ok": False, "error": str(e)}
     finally:
         sock.close()
 
 
-def query_docker_stats():
-    """Queries Docker socket for container uptime and log telemetry."""
-    if not os.path.exists(DOCKER_SOCKET):
-        return None, None, None
+_a2s_cache = {"t": 0.0, "v": None}
+_a2s_lock = threading.Lock()
 
-    uptime_str = None
-    fps = None
-    antistasi_metrics = None
 
+def cached_a2s():
+    with _a2s_lock:
+        if _a2s_cache["v"] is None or time.time() - _a2s_cache["t"] > A2S_CACHE_SEC:
+            _a2s_cache["v"] = query_a2s()
+            _a2s_cache["t"] = time.time()
+        return _a2s_cache["v"]
+
+
+# ---------------------------------------------------------------------------
+# main.cfg facts
+# ---------------------------------------------------------------------------
+def read_server_config():
     try:
-        # Container info for uptime
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(1.5)
-        s.connect(DOCKER_SOCKET)
-        req = f"GET /containers/{CONTAINER_NAME}/json HTTP/1.1\r\nHost: localhost\r\n\r\n"
-        s.sendall(req.encode())
-        res = b""
-        while True:
-            chunk = s.recv(4096)
-            if not chunk:
-                break
-            res += chunk
-            if b"\r\n\r\n" in res and (b"}\r\n" in res or res.endswith(b"}")):
-                break
-        s.close()
-
-        body_idx = res.find(b"\r\n\r\n")
-        if body_idx != -1:
-            raw_json = res[body_idx+4:].decode("utf-8", errors="ignore")
-            # Handle chunked transfer if present
-            if "\r\n" in raw_json and not raw_json.strip().startswith("{"):
-                parts = raw_json.split("\r\n", 1)
-                if len(parts) > 1:
-                    raw_json = parts[1]
-            try:
-                cdata = json.loads(raw_json)
-                started_at = cdata.get("State", {}).get("StartedAt")
-                if started_at:
-                    # e.g. 2026-10-05T04:41:27.123456789Z
-                    clean_iso = started_at[:19] + "Z"
-                    start_dt = datetime.fromisoformat(clean_iso.replace("Z", "+00:00"))
-                    diff = datetime.now(timezone.utc) - start_dt
-                    total_seconds = int(diff.total_seconds())
-                    hours = total_seconds // 3600
-                    minutes = (total_seconds % 3600) // 60
-                    uptime_str = f"{hours}h {minutes}m"
-            except Exception:
-                pass
+        with open(MAIN_CFG, encoding="utf-8", errors="replace") as f:
+            text = f.read()
     except Exception:
-        pass
+        return None
+    text = re.sub(r"//[^\n]*", "", text)
 
-    # Read latest logs to get Antistasi ServerFPS
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(1.5)
-        s.connect(DOCKER_SOCKET)
-        # Fetch last 400 lines of logs
-        req = f"GET /containers/{CONTAINER_NAME}/logs?stdout=1&stderr=1&tail=400 HTTP/1.1\r\nHost: localhost\r\n\r\n"
-        s.sendall(req.encode())
-        log_bytes = b""
-        while len(log_bytes) < 65536:
-            chunk = s.recv(4096)
-            if not chunk:
-                break
-            log_bytes += chunk
-        s.close()
+    def num(key):
+        m = re.search(rf"^\s*{key}\s*=\s*(-?\d+)\s*;", text, re.M | re.I)
+        return int(m.group(1)) if m else None
 
-        # Extract text ignoring binary frame headers
-        clean_text = "".join(
-            chr(b) if 32 <= b <= 126 or b == 10 else " " for b in log_bytes
-        )
-
-        # Regex for ServerFPS
-        fps_matches = re.findall(r"ServerFPS=([\d.]+)", clean_text)
-        if fps_matches:
-            fps = round(float(fps_matches[-1]), 1)
-
-        # Regex for Antistasi rich performance stats
-        # e.g. ServerFPS=62.2568 Players=4 DeadUnits=75 AllUnits=15 ... FactionCash=14552 HR=32 OccAggro=87 InvAggro=0 Warlevel=2 RivalsActivityLevel=5
-        last_perf = re.findall(
-            r"ServerFPS=([\d.]+)\s+Players=(\d+)\s+DeadUnits=(\d+)\s+AllUnits=(\d+).*?FactionCash=(\d+)\s+HR=(\d+)\s+OccAggro=(\d+)\s+InvAggro=(\d+)\s+Warlevel=(\d+)",
-            clean_text,
-        )
-        if last_perf:
-            m = last_perf[-1]
-            antistasi_metrics = {
-                "serverFps": round(float(m[0]), 1),
-                "players": int(m[1]),
-                "deadUnits": int(m[2]),
-                "allUnits": int(m[3]),
-                "factionCash": int(m[4]),
-                "hr": int(m[5]),
-                "occAggro": int(m[6]),
-                "invAggro": int(m[7]),
-                "warLevel": int(m[8]),
-            }
-    except Exception:
-        pass
-
-    return uptime_str, fps, antistasi_metrics
-
-
-def is_headless_client(name: str) -> bool:
-    if not name:
-        return False
-    n = name.lower()
-    return bool(re.search(r"(antistasi_server-)?hc(-\d+)?", n) or "headless" in n)
-
-
-def get_full_telemetry():
-    now = time.time()
-    if _cache["data"] and (now - _cache["timestamp"] < CACHE_TTL_SEC):
-        return _cache["data"]
-
-    success, a2s_data, raw_players = query_a2s()
-    uptime_str, log_fps, antistasi_stats = query_docker_stats()
-
-    # Filter out Headless Clients from human player list
-    human_players = []
-    active_hcs = []
-    for p in raw_players:
-        if is_headless_client(p.get("name", "")):
-            active_hcs.append(p.get("name", ""))
-        else:
-            human_players.append(p)
-
-    # Calculate real human players count
-    human_player_count = len(human_players)
-
-    status = "online" if success else "offline"
-    server_fps = log_fps if log_fps is not None else 50.0
-
-    telemetry = {
-        "name": a2s_data.get("name", "Frenchy's Antistasi Ultimate [RHS] | 32-Player Dedicated"),
-        "ip": os.environ.get("SERVER_PUBLIC_IP", "180.181.238.103"),
-        "port": GAME_PORT,
-        "queryPort": A2S_PORT,
-        "status": status,
-        "ping": a2s_data.get("ping", 15),
-        "players": human_player_count,
-        "maxPlayers": a2s_data.get("maxPlayers", 32),
-        "playerList": human_players,
-        "map": a2s_data.get("map", "Altis"),
-        "mission": a2s_data.get("mission", "Antistasi Ultimate - Altis"),
-        "gameType": a2s_data.get("gameType", "Antistasi Ultimate"),
-        "version": a2s_data.get("version", "2.22.154089"),
-        "battleye": a2s_data.get("battleye", True),
-        "passwordProtected": a2s_data.get("passwordProtected", False),
-        "difficulty": "Custom",
-        "timeOfDay": "Dynamic (In-Game)",
-        "uptime": uptime_str or "Active",
-        "querySource": "direct_a2s",
-        "lastUpdated": datetime.now(timezone.utc).isoformat(),
-        "discordUrl": "https://discord.gg/arma3",
-        "platform": "Linux Dedicated Server (ARM64 / FEX x86_64)",
-        "serverFps": server_fps,
-        "headlessClients": {
-            "total": EXPECTED_HCS,
-            "active": len(active_hcs),
-            "names": active_hcs,
-        },
-        "antistasi": antistasi_stats,
+    diff = re.search(r'difficulty\s*=\s*"([^"]+)"', text, re.I)
+    return {
+        "battlEye": num("BattlEye"),
+        "verifySignatures": num("verifySignatures"),
+        "maxPlayers": num("maxPlayers"),
+        "voiceEnabled": None if num("disableVoN") is None else num("disableVoN") == 0,
+        "persistent": None if num("persistent") is None else num("persistent") == 1,
+        "difficulty": diff.group(1) if diff else None,
     }
 
-    _cache["timestamp"] = now
-    _cache["data"] = telemetry
-    return telemetry
+
+# ---------------------------------------------------------------------------
+# Derived views
+# ---------------------------------------------------------------------------
+def is_hc_name(name):
+    return bool(re.match(r"^headlessclient( \(\d+\))?$", name, re.I)) or "-hc-" in name.lower()
 
 
-class TelemetryHandler(BaseHTTPRequestHandler):
-    def log_message(self, format, *args):
-        # Keep stdout clean; only log errors or when debugging
-        if sys.stderr.isatty():
-            super().log_message(format, *args)
+def build_telemetry():
+    a2s = cached_a2s()
+    started = container_started_at()
+    now = now_utc()
+    with LOG.lock:
+        perf = dict(LOG.perf) if LOG.perf else None
+        hc_ids = list(LOG.hc_ids)
+        hc_at = LOG.hc_updated_at
+    if perf:
+        perf["ageSeconds"] = int((now - perf["sampledAt"]).total_seconds())
+        perf["sampledAt"] = iso(perf["sampledAt"])
 
-    def send_cors_headers(self):
+    humans = [p for p in a2s.get("roster", []) if not is_hc_name(p["name"])] if a2s.get("ok") else []
+    for idx, p in enumerate(humans, 1):
+        p["id"] = idx
+
+    out = {
+        "status": "online" if a2s.get("ok") else ("offline" if started is None else "unreachable"),
+        "ip": PUBLIC_IP or None,
+        "port": GAME_PORT,
+        "queryPort": A2S_PORT,
+        "querySource": "telemetry_bridge",
+        "lastUpdated": iso(now),
+        "players": len(humans) if a2s.get("ok") else None,
+        "playerList": humans,
+        "uptimeSeconds": int((now - started).total_seconds()) if started else None,
+        "containerStartedAt": iso(started),
+        "platform": "Linux aarch64 (Arma 3 x86_64 server under FEX-Emu)",
+        # Antistasi only writes performance samples while players are connected.
+        "performance": perf,
+        "serverFps": perf["serverFps"] if perf and perf["ageSeconds"] <= 90 else None,
+        "headlessClients": {
+            "expected": EXPECTED_HCS,
+            "active": len(hc_ids),
+            "updatedAt": iso(hc_at),
+        } if LOG.follower_ok or hc_at else None,
+        "serverConfig": read_server_config(),
+        "logFollower": {"ok": LOG.follower_ok, "error": LOG.follower_error},
+    }
+    if a2s.get("ok"):
+        out.update({k: a2s[k] for k in ("name", "map", "mission", "version", "maxPlayers",
+                                         "passwordProtected", "battleye", "ping")})
+    else:
+        out["a2sError"] = a2s.get("error")
+    return out
+
+
+def build_players():
+    sessions = SESSIONS.snapshot()
+    now = now_utc()
+    roster = {}
+    for s in sessions:
+        start = datetime.fromisoformat(s["connectedAt"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(s["disconnectedAt"].replace("Z", "+00:00")) if s["disconnectedAt"] else now
+        r = roster.setdefault(s["uid"], {
+            "name": s["name"], "sessions": 0, "totalSeconds": 0,
+            "firstSeen": s["connectedAt"], "lastSeen": None, "online": False,
+        })
+        r["name"] = s["name"]  # latest name wins
+        r["sessions"] += 1
+        r["totalSeconds"] += max(0, int((end - start).total_seconds()))
+        r["firstSeen"] = min(r["firstSeen"], s["connectedAt"])
+        seen = s["disconnectedAt"] or iso(now)
+        r["lastSeen"] = max(r["lastSeen"] or seen, seen)
+        if s["disconnectedAt"] is None:
+            r["online"] = True
+    # Cross-check "online" against the live A2S roster when available.
+    a2s = cached_a2s()
+    if a2s.get("ok"):
+        live = {p["name"] for p in a2s["roster"]}
+        for r in roster.values():
+            r["online"] = r["name"] in live
+    players = sorted(roster.values(), key=lambda r: (-r["online"], -r["totalSeconds"]))
+    earliest = min((s["connectedAt"] for s in sessions), default=None)
+    return {"trackingSince": earliest, "generatedAt": iso(now), "players": players}
+
+
+def build_history(hours, bucket_minutes):
+    now = now_utc()
+    start_ts = now.timestamp() - hours * 3600
+    step = bucket_minutes * 60
+    spans = []
+    for s in SESSIONS.snapshot():
+        a = datetime.fromisoformat(s["connectedAt"].replace("Z", "+00:00")).timestamp()
+        b = (datetime.fromisoformat(s["disconnectedAt"].replace("Z", "+00:00")).timestamp()
+             if s["disconnectedAt"] else now.timestamp())
+        spans.append((a, b, s["uid"]))
+    points = []
+    t = start_ts - (start_ts % step)
+    while t <= now.timestamp():
+        b_end = t + step
+        # peak = players overlapping this bucket at any moment
+        count = len({uid for a, b, uid in spans if a < b_end and b > t})
+        points.append({"t": iso(datetime.fromtimestamp(t, timezone.utc)), "players": count})
+        t += step
+    earliest = min((a for a, _, _ in spans), default=None)
+    return {
+        "hours": hours, "bucketMinutes": bucket_minutes,
+        "trackingSince": iso(datetime.fromtimestamp(earliest, timezone.utc)) if earliest else None,
+        "points": points,
+    }
+
+
+# ---------------------------------------------------------------------------
+# HTTP
+# ---------------------------------------------------------------------------
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+    def _send(self, code, obj, cache="no-store"):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key")
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", cache)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_OPTIONS(self):
-        self.send_response(204)
-        self.send_cors_headers()
-        self.end_headers()
+        self._send(204, {})
+
+    def _authorized(self):
+        if not API_KEY:
+            return True
+        key = self.headers.get("x-api-key", "")
+        auth = self.headers.get("Authorization", "")
+        if not key and auth.lower().startswith("bearer "):
+            key = auth[7:].strip()
+        return key == API_KEY
 
     def do_GET(self):
-        parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/")
-
-        # Healthcheck
-        if path in ("", "/health"):
-            self.send_response(200)
-            self.send_cors_headers()
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "ok", "service": "arma3-telemetry-bridge"}).encode("utf-8"))
-            return
-
-        # Main telemetry endpoint
-        if path in ("/api/telemetry", "/telemetry", "/api/server"):
-            # Check optional API Key
-            if API_KEY:
-                req_key = self.headers.get("x-api-key", "")
-                if not req_key and "Authorization" in self.headers:
-                    auth = self.headers.get("Authorization", "")
-                    if auth.lower().startswith("bearer "):
-                        req_key = auth[7:].strip()
-
-                if req_key != API_KEY:
-                    self.send_response(401)
-                    self.send_cors_headers()
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(json.dumps({"error": "Unauthorized: Invalid or missing API key"}).encode("utf-8"))
-                    return
-
-            data = get_full_telemetry()
-            payload = json.dumps(data, indent=2).encode("utf-8")
-
-            self.send_response(200)
-            self.send_cors_headers()
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Cache-Control", "public, s-maxage=2, stale-while-revalidate=5")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-            return
-
-        self.send_response(404)
-        self.send_cors_headers()
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps({"error": "Not Found"}).encode("utf-8"))
+        url = urlparse(self.path)
+        path = url.path.rstrip("/") or "/"
+        q = parse_qs(url.query)
+        if path in ("/", "/health"):
+            return self._send(200, {"status": "ok", "logFollower": LOG.follower_ok})
+        if not self._authorized():
+            return self._send(401, {"error": "Unauthorized"})
+        try:
+            if path in ("/api/telemetry", "/api/server"):
+                return self._send(200, build_telemetry())
+            if path == "/api/players":
+                return self._send(200, build_players())
+            if path == "/api/history":
+                hours = max(1, min(24 * 30, int(q.get("hours", ["24"])[0])))
+                bucket = max(1, min(240, int(q.get("bucket", ["15"])[0])))
+                return self._send(200, build_history(hours, bucket))
+        except Exception as e:
+            return self._send(500, {"error": str(e)})
+        return self._send(404, {"error": "Not Found"})
 
 
 def main():
-    server_address = (HOST, PORT)
-    httpd = HTTPServer(server_address, TelemetryHandler)
-    print(f"Arma 3 Telemetry Bridge running on http://{HOST}:{PORT}")
-    print(f"Monitoring A2S at {A2S_HOST}:{A2S_PORT} and Docker {CONTAINER_NAME}")
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("\nShutting down Telemetry Bridge...")
-        httpd.server_close()
+    threading.Thread(target=follow_logs_forever, daemon=True).start()
+    httpd = ThreadingHTTPServer((HOST, PORT), Handler)
+    print(f"Telemetry bridge on http://{HOST}:{PORT} (A2S {A2S_HOST}:{A2S_PORT}, container {CONTAINER})", flush=True)
+    httpd.serve_forever()
 
 
 if __name__ == "__main__":

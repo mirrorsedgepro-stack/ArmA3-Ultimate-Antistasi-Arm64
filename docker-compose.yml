@@ -88,6 +88,8 @@ services:
       - HEADLESS_CLIENTS=${HEADLESS_CLIENTS:-3}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./configs/main.cfg:/config/main.cfg:ro
+      - telemetry_data:/data
 
 volumes:
   server_base:
@@ -106,4 +108,5 @@ volumes:
   steam_root:
   discord_bot_data:
   discord_bot_profiles:
+  telemetry_data:
 
