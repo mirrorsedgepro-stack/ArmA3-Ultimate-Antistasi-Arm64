@@ -248,6 +248,7 @@ class LogState:
         self.hc_ids = []            # Antistasi HC owner IDs currently registered
         self.hc_updated_at = None
         self.last_log_at = None
+        self.killfeed_at = None     # when the A3KF hook last reported itself installed
 
 
 LOG = LogState()
@@ -269,6 +270,11 @@ RE_ATTACK_START = re.compile(r'A3A_fnc_singleAttack \| Starting attack with para
 RE_ATTACK_END = re.compile(r"A3A_fnc_singleAttack \| \w+ attack to (\w+) (has been defeated|captured the marker)")
 RE_PROMOTE = re.compile(r"A3A_fnc_promotePlayer \| Promoting (.+) player \(Current Rank: \w+\) to new (\w+)\.")
 RE_UNIT_PLAYER = re.compile(r"\(([^()]+)\)\s*$")  # "R Alpha 1-2:3 (INTENT)" -> INTENT
+# Kill feed lines from services/killfeed (A3KF|1|kind|victim|vSide|vPlayer|killer|kSide|kPlayer|weapon|dist)
+RE_KILL = re.compile(
+    r"A3KF\|1\|(man|veh)\|([^|]*)\|(\w*)\|(true|false)\|([^|]*)\|(\w*)\|(true|false)\|([^|]*)\|(-?\d+)\s*$"
+)
+RE_KILLFEED_INSTALLED = re.compile(r"A3KF\|installed\s*$")
 
 
 def ids(s):
@@ -285,6 +291,7 @@ def handle_line(ts, text):
         with LOG.lock:
             LOG.hc_ids = []
             LOG.hc_updated_at = ts
+            LOG.killfeed_at = None  # the hook lives in the mission; a restart drops it unless the addon loads
         return
 
     m = RE_PERF.search(text)
@@ -363,7 +370,21 @@ def marker_label(marker):
 
 def handle_campaign_event(ts, text):
     # Cheap pre-filter: every campaign line contains one of these.
-    if "was killed" not in text and "A3A_fnc_" not in text:
+    if "was killed" not in text and "A3A_fnc_" not in text and "A3KF|" not in text:
+        return
+
+    if "A3KF|" in text:
+        m = RE_KILL.search(text)
+        if m:
+            kind, victim, v_side, v_player, killer, k_side, k_player, weapon, dist = m.groups()
+            dist = int(dist)
+            EVENTS.add(ts, "kill", f"{victim}|{killer}",
+                       kind=kind, victim=victim, victimSide=v_side or None, victimIsPlayer=v_player == "true",
+                       killer=killer or None, killerSide=k_side or None, killerIsPlayer=k_player == "true",
+                       weapon=weapon or None, distance=dist if dist >= 0 else None)
+        elif RE_KILLFEED_INSTALLED.search(text):
+            with LOG.lock:
+                LOG.killfeed_at = ts
         return
 
     m = RE_KILLED.match(text)
@@ -580,6 +601,7 @@ def build_telemetry():
         perf = dict(LOG.perf) if LOG.perf else None
         hc_ids = list(LOG.hc_ids)
         hc_at = LOG.hc_updated_at
+        killfeed_at = LOG.killfeed_at
     if perf:
         perf["ageSeconds"] = int((now - perf["sampledAt"]).total_seconds())
         perf["sampledAt"] = iso(perf["sampledAt"])
@@ -610,6 +632,7 @@ def build_telemetry():
         } if LOG.follower_ok or hc_at else None,
         "serverConfig": read_server_config(),
         "logFollower": {"ok": LOG.follower_ok, "error": LOG.follower_error},
+        "killFeed": {"installedAt": iso(killfeed_at)} if killfeed_at else None,
     }
     if a2s.get("ok"):
         out.update({k: a2s[k] for k in ("name", "map", "mission", "version", "maxPlayers",
@@ -638,12 +661,19 @@ def build_players():
         r["lastSeen"] = max(r["lastSeen"] or seen, seen)
         if s["disconnectedAt"] is None:
             r["online"] = True
-    deaths = {}
+    deaths, kills = {}, {}
+    has_killfeed = False
     for e in EVENTS.snapshot():
         if e["type"] == "death":
             deaths[e["player"]] = deaths.get(e["player"], 0) + 1
+        elif e["type"] == "kill":
+            has_killfeed = True
+            if e.get("killerIsPlayer") and e.get("kind") == "man" and e.get("killer"):
+                kills[e["killer"]] = kills.get(e["killer"], 0) + 1
     for r in roster.values():
         r["deaths"] = deaths.get(r["name"], 0)
+        if has_killfeed:
+            r["kills"] = kills.get(r["name"], 0)
     # Cross-check "online" against the live A2S roster when available.
     a2s = cached_a2s()
     if a2s.get("ok"):
