@@ -16,7 +16,6 @@ class CfgFunctions {
             file = "\a3kf\functions";
             class init { postInit = 1; };
             class map { postInit = 1; };
-            class mapDetail { postInit = 1; };
         };
     };
 };

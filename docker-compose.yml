@@ -10,8 +10,6 @@ services:
     cpuset: "5-9,15-19"
     restart: unless-stopped
     env_file: .env
-    environment:
-      - DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
     volumes:
       # Persistent storage for Arma 3 server root directory and binaries
       - server_base:/arma3
@@ -21,9 +19,6 @@ services:
       - ./missions:/arma3/mpmissions
       - ./mods:/arma3/mods
       - ./servermods:/arma3/servermods
-      - ./extensions:/arma3/extensions
-      - ./Discord_Message_API:/arma3/Discord_Message_API
-      - ./userconfig:/arma3/userconfig
       - ./container_src/launch.py:/launch.py
 
       # Persistent storage for Arma 3 server base game depots & DLCs
@@ -42,31 +37,6 @@ services:
       # Persistent storage for Steam credentials, session tokens, and Steam Guard
       - steam_data:/root/Steam
       - steam_root:/root/.steam
-
-  discord_bot:
-    build:
-      context: ./services/arma3webservice
-      dockerfile: Dockerfile
-    image: arma3webservice:latest
-    container_name: arma3_discord_bot
-    restart: unless-stopped
-    network_mode: host
-    environment:
-      - ASPNETCORE_ENVIRONMENT=Production
-      - ASPNETCORE_HTTP_PORTS=5048
-      - Jwt_Secret=${DISCORD_JWT_SECRET}
-      - APIKey=${DISCORD_API_KEY}
-      - DB_PROVIDER=SQLite
-      - DB_CONNECTION_STRING=Data Source=.data/data.db
-      - BotToken=${DISCORD_BOT_TOKEN}
-      - MonitorChannel=${DISCORD_MONITOR_CHANNEL}
-      - AdminChannel=${DISCORD_ADMIN_CHANNEL}
-      - AdminLoggingChannel=${DISCORD_ADMIN_LOG_CHANNEL}
-      - LoggingChannel=${DISCORD_LOG_CHANNEL}
-      - AdminPassword=${ARMA_PASSWORD_ADMIN}
-    volumes:
-      - discord_bot_data:/app/.data
-      - discord_bot_profiles:/app/.profile
 
   telemetry_bridge:
     build:
@@ -111,7 +81,5 @@ volumes:
   workshop:
   steam_data:
   steam_root:
-  discord_bot_data:
-  discord_bot_profiles:
   telemetry_data:
 

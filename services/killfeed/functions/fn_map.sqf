@@ -10,7 +10,7 @@
 //   A3MAP|1|p|id|name|x|y|dir|vehicle|side
 if (!isServer) exitWith {};
 
-A3KF_mapGrid = 1024;
+A3KF_mapGrid = 512;
 
 [] spawn {
     private _clean = { (_this splitString "|") joinString "/" };
