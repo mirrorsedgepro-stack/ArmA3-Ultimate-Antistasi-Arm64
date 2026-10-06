@@ -2,7 +2,10 @@ FROM python:3.12-alpine
 
 WORKDIR /app
 
-COPY server.py /app/server.py
+# numpy + Pillow draw the map tiles (tiles.py)
+RUN pip install --no-cache-dir numpy==2.* pillow==11.*
+
+COPY server.py tiles.py /app/
 
 EXPOSE 2310
 

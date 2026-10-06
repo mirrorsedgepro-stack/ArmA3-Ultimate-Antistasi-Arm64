@@ -17,7 +17,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 PREFIX = "a3kf"
-FILES = ["config.cpp", "functions/fn_init.sqf", "functions/fn_map.sqf"]
+FILES = ["config.cpp", "functions/fn_init.sqf", "functions/fn_map.sqf", "functions/fn_mapDetail.sqf"]
 OUT_PBO = os.path.join(ROOT, "servermods", "@a3kf", "addons", "a3kf.pbo")
 OUT_SNIPPET = os.path.join(HERE, "zeus_snippet.sqf")
 
@@ -66,9 +66,9 @@ def zeus_snippet(sqf):
 
 def main():
     pack_pbo(OUT_PBO, PREFIX, FILES)
-    # Kill feed and map feed in one snippet, so a single Zeus "Execute Code" enables both.
+    # Kill feed, map feed and map detail in one snippet, so a single Zeus "Execute Code" enables both.
     snippet = ""
-    for name in ("fn_init.sqf", "fn_map.sqf"):
+    for name in ("fn_init.sqf", "fn_map.sqf", "fn_mapDetail.sqf"):
         with open(os.path.join(HERE, "functions", name)) as f:
             snippet += zeus_snippet(f.read())
     with open(OUT_SNIPPET, "w") as f:

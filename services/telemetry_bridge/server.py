@@ -22,7 +22,9 @@ import json
 import os
 import re
 import socket
+import shutil
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -252,6 +254,7 @@ class MapState:
         self.hq = None
         self.snapshots = []         # [(ts, [players])], oldest first
         self.pending = None         # (tick, ts, expected, [players])
+        self.world_seq = 0          # bumped on every mission start seen in the log
 
     def _terrain_path(self, world):
         return os.path.join(self.data_dir, f"map_terrain_{re.sub(r'[^A-Za-z0-9_]', '', world)}.json")
@@ -269,6 +272,7 @@ class MapState:
     def new_world(self, name, size, grid):
         with self.lock:
             self.world = {"name": name, "size": size, "grid": grid}
+            self.world_seq += 1
             self.terrain_rows = {}
             self.towns = {}
             self.zones = {}
@@ -282,10 +286,13 @@ class MapState:
         with self.lock:
             if not self.world:
                 return
-            self.terrain_rows.setdefault(row, ["", ""])[part] = hexdata
             grid = self.world["grid"]
-            if len(self.terrain_rows) == grid and all(a and b for a, b in self.terrain_rows.values()):
-                rows = [self.terrain_rows[r][0] + self.terrain_rows[r][1] for r in range(grid)]
+            parts = max(1, grid // 256)
+            if not 0 <= part < parts:
+                return
+            self.terrain_rows.setdefault(row, [""] * parts)[part] = hexdata
+            if len(self.terrain_rows) == grid and all(all(p) for p in self.terrain_rows.values()):
+                rows = ["".join(self.terrain_rows[r]) for r in range(grid)]
                 self.terrain = done = {"world": self.world["name"], "size": self.world["size"], "grid": grid, "rows": rows}
                 self.terrain_rows = {}
         if done:
@@ -294,6 +301,17 @@ class MapState:
             with open(tmp, "w") as f:
                 json.dump(done, f)
             os.replace(tmp, self._terrain_path(done["world"]))
+            DETAIL.maybe_render()
+
+    def terrain_preview(self, max_grid=512):
+        """The terrain for the in-browser relief fallback, downsampled to at most max_grid."""
+        with self.lock:
+            t = self.terrain
+        if not t or t["grid"] <= max_grid:
+            return t
+        k = t["grid"] // max_grid
+        rows = ["".join(r[i:i + 2] for i in range(0, len(r), 2 * k)) for r in t["rows"][::k]]
+        return {"world": t["world"], "size": t["size"], "grid": len(rows), "rows": rows}
 
     def player_tick(self, ts, tick, count):
         with self.lock:
@@ -342,10 +360,209 @@ class MapState:
                 "trails": trails,
                 "playersAt": iso(current[0]) if current else None,
                 "delaySeconds": MAP_POSITION_DELAY,
+                "tiles": DETAIL.tiles_info(),
             }
 
 
 MAP = MapState(DATA_DIR)
+
+
+class DetailState:
+    """Roads, buildings, ground cover and trees from fn_mapDetail.sqf, rendered into map tiles."""
+
+    TILES_DIR = os.path.join(DATA_DIR, "tiles")
+    RENDER_PROCESSES = int(os.environ.get("MAP_RENDER_PROCESSES", "4"))
+
+    def __init__(self, data_dir):
+        self.data_dir = data_dir
+        self.lock = threading.Lock()
+        self.collect = None
+        self.detail = None
+        self.rendering = None      # version being rendered
+        self.detail_seq = None     # MAP.world_seq of the mission whose export we hold
+        self.ready_version = None
+        self.failed_version = None
+
+    def _path(self, world):
+        return os.path.join(self.data_dir, f"map_detail_{re.sub(r'[^A-Za-z0-9_]', '', world)}.json")
+
+    def load(self, world):
+        try:
+            with open(self._path(world)) as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return None
+        except Exception as e:
+            print(f"[map] could not load detail: {e}", file=sys.stderr)
+            return None
+
+    def start(self, world, surface_grid, tree_grid):
+        with self.lock:
+            self.collect = {"world": world, "surfaceGrid": surface_grid, "treeGrid": tree_grid,
+                            "surfaceLegend": {}, "surfaceRows": {}, "treeRows": {}, "roads": [], "buildings": []}
+
+    def record(self, kind, f):
+        with self.lock:
+            c = self.collect
+            if not c:
+                return
+            if kind == "sk" and len(f) == 2:
+                c["surfaceLegend"][f[0]] = f[1]
+            elif kind == "s" and len(f) == 3:
+                c["surfaceRows"].setdefault(int(f[0]), {})[int(f[1])] = f[2]
+            elif kind == "tr" and len(f) == 3:
+                c["treeRows"][int(f[0])] = f[2]
+            elif kind == "rd" and f:
+                for item in "|".join(f).split("/"):
+                    p = item.split(";")
+                    if len(p) == 7:
+                        c["roads"].append([p[0], float(p[1]), int(p[2]), int(p[3]), int(p[4]), int(p[5]), int(p[6])])
+            elif kind == "bd" and f:
+                for item in "|".join(f).split("/"):
+                    p = item.split(";")
+                    if len(p) == 6:
+                        c["buildings"].append([int(p[0]), int(p[1]), float(p[2]), float(p[3]), int(p[4]), int(p[5])])
+
+    def end(self):
+        with self.lock:
+            c, self.collect = self.collect, None
+        if not c:
+            return
+        sg, tg = c["surfaceGrid"], c["treeGrid"]
+        parts = max(1, sg // 256)
+        if len(c["surfaceRows"]) != sg or len(c["treeRows"]) != tg or \
+                any(len(r) != parts for r in c["surfaceRows"].values()):
+            print("[map] detail export incomplete; ignoring it", file=sys.stderr)
+            return
+        detail = {
+            "world": c["world"], "surfaceGrid": sg, "treeGrid": tg, "surfaceLegend": c["surfaceLegend"],
+            "surfaceRows": ["".join(c["surfaceRows"][r][p] for p in range(parts)) for r in range(sg)],
+            "treeRows": [c["treeRows"][r] for r in range(tg)],
+            "roads": c["roads"], "buildings": c["buildings"],
+        }
+        os.makedirs(self.data_dir, exist_ok=True)
+        tmp = self._path(detail["world"]) + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(detail, f)
+        os.replace(tmp, self._path(detail["world"]))
+        with self.lock:
+            self.detail = detail
+            self.detail_seq = MAP.world_seq
+        print(f"[map] detail: {len(detail['roads'])} road segments, {len(detail['buildings'])} buildings", flush=True)
+        self.maybe_render()
+
+    def maybe_render(self, from_disk=False):
+        """Render tiles when terrain and detail from the same mission start exist and aren't rendered yet.
+
+        from_disk: use saved data even if the current log has no export (e.g. the game container's
+        log was reset); only used once the log replay has finished.
+        """
+        with MAP.lock:
+            terrain = MAP.terrain
+            seq = MAP.world_seq
+            if MAP.terrain_rows:
+                return  # a terrain dump is still arriving; render once it completes
+        with self.lock:
+            detail = self.detail
+            # During log replay older missions pass by; only pair data from one mission start.
+            if not from_disk and (detail is None or self.detail_seq != seq):
+                return
+        if not terrain and MAP.world:
+            terrain = MAP.load_terrain(MAP.world["name"])
+        if not detail and terrain:
+            detail = self.load(terrain["world"])
+            with self.lock:
+                self.detail = detail
+        if not terrain or not detail or terrain["world"] != detail["world"]:
+            return
+        version = self._version(terrain, detail)
+        out = os.path.join(self.TILES_DIR, version)
+        with self.lock:
+            if os.path.exists(os.path.join(out, "done.json")):
+                self.ready_version = version
+                self._cleanup(keep=version)
+                return
+            if self.rendering == version or self.failed_version == version:
+                return
+            self.rendering = version
+        threading.Thread(target=self._render, args=(terrain, detail, version, out), daemon=True).start()
+
+    @staticmethod
+    def _version(terrain, detail):
+        import hashlib
+        h = hashlib.sha1(b"render-2")  # bump when tiles.py drawing changes
+        for row in terrain["rows"]:
+            h.update(row.encode())
+        h.update(json.dumps(detail, sort_keys=True).encode())
+        return h.hexdigest()[:12]
+
+    def _render(self, terrain, detail, version, out):
+        os.makedirs(self.TILES_DIR, exist_ok=True)
+        tpath = os.path.join(self.TILES_DIR, f"{version}.terrain.json")
+        dpath = os.path.join(self.TILES_DIR, f"{version}.detail.json")
+        with open(tpath, "w") as f:
+            json.dump(terrain, f)
+        with open(dpath, "w") as f:
+            json.dump(detail, f)
+        print(f"[map] rendering tiles {version}...", flush=True)
+        started = time.time()
+        try:
+            proc = subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "tiles.py"),
+                                   tpath, dpath, out, str(self.RENDER_PROCESSES)],
+                                  capture_output=True, text=True)
+            ok = proc.returncode == 0 and os.path.exists(os.path.join(out, "done.json"))
+            print(f"[map] tiles {version}: {'done' if ok else 'FAILED'} in {time.time() - started:.0f}s "
+                  f"{proc.stdout.strip()} {proc.stderr.strip()[-500:]}", flush=True)
+        finally:
+            for p in (tpath, dpath):
+                try:
+                    os.remove(p)
+                except FileNotFoundError:
+                    pass
+        with self.lock:
+            self.rendering = None
+            if ok:
+                self.ready_version = version
+            else:
+                self.failed_version = version
+        if ok:
+            self._cleanup(keep=version)
+
+    def _cleanup(self, keep):
+        try:
+            for name in os.listdir(self.TILES_DIR):
+                path = os.path.join(self.TILES_DIR, name)
+                if name != keep and os.path.isdir(path) and not name.endswith(".partial"):
+                    shutil.rmtree(path, ignore_errors=True)
+        except FileNotFoundError:
+            pass
+
+    def tiles_info(self):
+        with self.lock:
+            ready, rendering = self.ready_version, self.rendering
+        progress = None
+        if rendering:
+            try:
+                with open(os.path.join(self.TILES_DIR, rendering + ".progress")) as f:
+                    progress = float(f.read() or 0)
+            except (FileNotFoundError, ValueError):
+                progress = 0.0
+        if not ready and not rendering:
+            return None
+        return {"version": ready, "ready": bool(ready), "rendering": bool(rendering), "progress": progress,
+                "maxZoom": 6, "tileSize": 256}
+
+    def tile_path(self, version, z, x, y):
+        with self.lock:
+            if version != self.ready_version:
+                return None
+        if not (0 <= z <= 6 and 0 <= x < 2 ** z and 0 <= y < 2 ** z):
+            return None
+        p = os.path.join(self.TILES_DIR, version, str(z), str(x), f"{y}.png")
+        return p if os.path.exists(p) else os.path.join(self.TILES_DIR, version, "sea.png")
+
+
+DETAIL = DetailState(DATA_DIR)
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +706,12 @@ def handle_map_record(ts, kind, f):
                 MAP.towns[f"{name}|{x}|{y}"] = {"name": name, "type": ttype, "x": int(x), "y": int(y)}
         elif kind == "world" and len(f) == 3:
             MAP.new_world(f[0], float(f[1]), int(f[2]))
+        elif kind in ("sk", "s", "tr", "rd", "bd"):
+            DETAIL.record(kind, f)
+        elif kind == "dstart" and len(f) == 3:
+            DETAIL.start(f[0], int(f[1]), int(f[2]))
+        elif kind == "dend":
+            DETAIL.end()
     except ValueError:
         pass  # malformed line; skip it
 
@@ -891,6 +1114,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_bytes(self, code, body, content_type, cache="no-store"):
+        self.send_response(code)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", cache)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_OPTIONS(self):
         self._send(204, {})
 
@@ -918,9 +1150,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, build_players())
             if path == "/api/map":
                 return self._send(200, MAP.view())
+            m = re.fullmatch(r"/api/map/tiles/([0-9a-f]{12})/(\d+)/(\d+)/(\d+)\.png", path)
+            if m:
+                tile = DETAIL.tile_path(m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4)))
+                if not tile:
+                    return self._send(404, {"error": "No such tile"})
+                with open(tile, "rb") as f:
+                    return self._send_bytes(200, f.read(), "image/png", "public, max-age=31536000, immutable")
             if path == "/api/map/terrain":
-                with MAP.lock:
-                    terrain = MAP.terrain
+                terrain = MAP.terrain_preview()
                 if not terrain:
                     return self._send(404, {"error": "Terrain not exported yet"})
                 return self._send(200, terrain, cache="public, max-age=3600")
@@ -938,6 +1176,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     threading.Thread(target=follow_logs_forever, daemon=True).start()
+    # Tiles from data saved by a previous run (e.g. after the game container's log was reset).
+    threading.Timer(120, DETAIL.maybe_render, kwargs={"from_disk": True}).start()
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"Telemetry bridge on http://{HOST}:{PORT} (A2S {A2S_HOST}:{A2S_PORT}, container {CONTAINER})", flush=True)
     httpd.serve_forever()

@@ -74,6 +74,9 @@ services:
       dockerfile: Dockerfile
     image: arma3-telemetry-bridge:latest
     container_name: arma3_telemetry_bridge
+    # Efficiency cores only: map tile rendering must never compete with Arma's
+    # performance cores (5-9, 15-19).
+    cpuset: "0-4,10-14"
     restart: unless-stopped
     network_mode: host
     environment:

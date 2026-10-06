@@ -11,6 +11,12 @@ zone's owner (from `sidesX`), the rebel HQ, and a player-position snapshot every
 while the server is empty). The bridge serves this as `/api/map` and `/api/map/terrain`; the
 terrain is also saved to `/data/map_terrain_<world>.json`.
 
+`functions/fn_mapDetail.sqf` also exports, once per mission start, the ground type (1024 grid),
+tree density (256 grid), every road segment (`getRoadInfo`) and building footprint. The bridge
+draws these into Arma-style map tiles (`services/telemetry_bridge/tiles.py`, zoom 0-6, about
+2,000 land tiles / 90 MB in `/data/tiles/<version>`), only when the export or the drawing code
+changes. Bump the `render-N` salt in `server.py` after changing `tiles.py`.
+
 Privacy, in `.env` (restart only the bridge to apply):
 
 - `MAP_POSITION_DELAY`: seconds to delay player positions on the site (0 = live).

@@ -1,8 +1,8 @@
 // A3KF map feed for the telemetry bridge. Every record stays far below the ~1000 character
 // RPT line limit.
 //   A3MAP|1|world|worldName|worldSize|grid          once per mission start
-//   A3MAP|1|t|row|part|hex                           terrain: grid rows south to north, two halves
-//                                                    per row; byte 00 = sea, else 1 + height/1.5 m
+//   A3MAP|1|t|row|part|hex                           terrain: grid rows south to north, 256 cells
+//                                                    per part; byte 00 = sea, else 1 + height/1.5 m
 //   A3MAP|1|town|name|type|x|y                       named places from the world config
 //   A3MAP|1|zone|marker|kind|x|y|side                Antistasi zones; repeated when the owner changes
 //   A3MAP|1|hq|x|y                                   rebel HQ
@@ -10,7 +10,7 @@
 //   A3MAP|1|p|id|name|x|y|dir|vehicle|side
 if (!isServer) exitWith {};
 
-A3KF_mapGrid = 512;
+A3KF_mapGrid = 1024;
 
 [] spawn {
     private _clean = { (_this splitString "|") joinString "/" };
@@ -28,7 +28,6 @@ A3KF_mapGrid = 512;
     private _size = worldSize;
     private _n = A3KF_mapGrid;
     private _step = _size / _n;
-    private _half = _n / 2;
     diag_log text format ["A3MAP|1|world|%1|%2|%3", worldName, _size, _n];
 
     private _digits = "0123456789abcdef" splitString "";
@@ -37,9 +36,9 @@ A3KF_mapGrid = 512;
 
     for "_r" from 0 to _n - 1 do {
         private _y = (_r + 0.5) * _step;
-        for "_part" from 0 to 1 do {
+        for "_part" from 0 to (_n / 256) - 1 do {
             private _cells = [];
-            for "_c" from _part * _half to (_part + 1) * _half - 1 do {
+            for "_c" from _part * 256 to _part * 256 + 255 do {
                 private _h = getTerrainHeightASL [(_c + 0.5) * _step, _y];
                 _cells pushBack (_hex select ([0, 1 + (254 min round (_h / 1.5))] select (_h > 0)));
             };
