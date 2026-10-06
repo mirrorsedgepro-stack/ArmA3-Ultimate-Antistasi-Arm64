@@ -43,6 +43,7 @@ EXPECTED_HCS = int(os.environ.get("HEADLESS_CLIENTS", "3"))
 MAIN_CFG = os.environ.get("ARMA_MAIN_CFG", "/config/main.cfg")
 DATA_DIR = os.environ.get("TELEMETRY_DATA_DIR", "/data")
 SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")
+EVENTS_FILE = os.path.join(DATA_DIR, "events.json")
 
 A2S_CACHE_SEC = 3.0
 
@@ -174,6 +175,64 @@ class SessionStore:
 SESSIONS = SessionStore(SESSIONS_FILE)
 
 
+class EventStore:
+    """Campaign event feed keyed by (type, second, subject) so log replays are idempotent.
+
+    The engine writes some lines (e.g. "X was killed") once per machine, so
+    duplicates within the same second collapse onto one key.
+    """
+
+    MAX_EVENTS = 2000
+
+    def __init__(self, path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.events = {}
+        self._dirty = False
+        try:
+            with open(self.path) as f:
+                for e in json.load(f):
+                    self.events[e["id"]] = e
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            print(f"[events] could not load {self.path}: {e}", file=sys.stderr)
+
+    def add(self, ts, etype, subject, **fields):
+        base = ts.replace(microsecond=0)
+        t = iso(base)
+        key = f"{etype}|{t}|{subject}"
+        # Copies of one line from several machines can straddle a second boundary.
+        nearby = {f"{etype}|{iso(base.fromtimestamp(base.timestamp() - d, timezone.utc))}|{subject}" for d in (1, 2)}
+        with self.lock:
+            if key in self.events or nearby & self.events.keys():
+                return
+            self.events[key] = {"id": key, "t": t, "type": etype, **fields}
+            if len(self.events) > self.MAX_EVENTS:
+                for k in sorted(self.events, key=lambda k: self.events[k]["t"])[: len(self.events) - self.MAX_EVENTS]:
+                    del self.events[k]
+            self._dirty = True
+
+    def save(self):
+        with self.lock:
+            if not self._dirty:
+                return
+            data = sorted(self.events.values(), key=lambda e: e["t"])
+            self._dirty = False
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, self.path)
+
+    def snapshot(self):
+        with self.lock:
+            return sorted((dict(e) for e in self.events.values()), key=lambda e: e["t"], reverse=True)
+
+
+EVENTS = EventStore(EVENTS_FILE)
+
+
 # ---------------------------------------------------------------------------
 # Log follower: FPS, Antistasi stats, HCs, player sessions
 # ---------------------------------------------------------------------------
@@ -203,6 +262,13 @@ RE_HC_DEL = re.compile(r"Headless client ID (\d+) disconnected from HC array \[(
 RE_CONNECT = re.compile(r"^\s*\d{1,2}:\d\d:\d\d Player (.+) connected \(id=([^)]+)\)\.\s*$")
 RE_DISCONNECT = re.compile(r"^\s*\d{1,2}:\d\d:\d\d Player (.+) disconnected\.\s*$")
 RE_SERVER_START = re.compile(r"Dedicated host created\.")
+# Campaign events
+RE_KILLED = re.compile(r"^\s*\d{1,2}:\d\d:\d\d\s+> (.+) was killed\s*$")
+RE_CAPTURE = re.compile(r"A3A_fnc_mrkWIN \| \w+ at (\d+) \((\w+)\): Flag capture completed by (.+?)\s*(?:\||$)")
+RE_ATTACK_START = re.compile(r'A3A_fnc_singleAttack \| Starting attack with parameters \["(\w+)",(WEST|EAST)')
+RE_ATTACK_END = re.compile(r"A3A_fnc_singleAttack \| \w+ attack to (\w+) (has been defeated|captured the marker)")
+RE_PROMOTE = re.compile(r"A3A_fnc_promotePlayer \| Promoting (.+) player \(Current Rank: \w+\) to new (\w+)\.")
+RE_UNIT_PLAYER = re.compile(r"\(([^()]+)\)\s*$")  # "R Alpha 1-2:3 (INTENT)" -> INTENT
 
 
 def ids(s):
@@ -260,11 +326,80 @@ def handle_line(ts, text):
         name, uid = m.group(1), m.group(2)
         if not uid.startswith("HC"):  # headless clients connect with id=HC<n>
             SESSIONS.connect(name, uid, ts)
+            EVENTS.add(ts, "join", name, player=name)
         return
 
     m = RE_DISCONNECT.match(text)
     if m:
-        SESSIONS.disconnect(m.group(1), ts)
+        name = m.group(1)
+        if not is_hc_name(name) and name in known_player_names():
+            EVENTS.add(ts, "leave", name, player=name)
+        SESSIONS.disconnect(name, ts)
+        return
+
+    handle_campaign_event(ts, text)
+
+
+def known_player_names():
+    return {s["name"] for s in SESSIONS.snapshot()}
+
+
+# Antistasi marker prefix -> display name
+MARKER_KINDS = {
+    "outpost": "Outpost", "resource": "Resource", "factory": "Factory", "seaport": "Seaport",
+    "airport": "Airbase", "milbase": "Military base", "Synd_HQ": "Rebel HQ",
+}
+
+
+def marker_label(marker):
+    prefix, _, num = marker.partition("_")
+    if marker in MARKER_KINDS:
+        return MARKER_KINDS[marker]
+    kind = MARKER_KINDS.get(prefix)
+    if not kind:
+        return marker
+    return f"{kind} {num}" if num.isdigit() else kind
+
+
+def handle_campaign_event(ts, text):
+    # Cheap pre-filter: every campaign line contains one of these.
+    if "was killed" not in text and "A3A_fnc_" not in text:
+        return
+
+    m = RE_KILLED.match(text)
+    if m:
+        name = m.group(1)
+        # Only real players: guards against AI names or chat text that looks alike.
+        if name in known_player_names():
+            EVENTS.add(ts, "death", name, player=name)
+        return
+
+    m = RE_CAPTURE.search(text)
+    if m:
+        grid, marker, by = m.group(1), m.group(2), m.group(3).strip()
+        pm = RE_UNIT_PLAYER.search(by)
+        player = pm.group(1) if pm else None  # "commanderX" is the rebel commander's unit, not a name
+        EVENTS.add(ts, "capture", marker, place=marker_label(marker), marker=marker, grid=grid,
+                   player=player, by=None if player else "Rebel commander")
+        return
+
+    m = RE_ATTACK_START.search(text)
+    if m:
+        marker, side = m.group(1), m.group(2)
+        EVENTS.add(ts, "counterattack", marker, place=marker_label(marker), marker=marker,
+                   enemy="Occupants" if side == "WEST" else "Invaders")
+        return
+
+    m = RE_ATTACK_END.search(text)
+    if m:
+        marker, outcome = m.group(1), m.group(2)
+        EVENTS.add(ts, "defended" if outcome == "has been defeated" else "lost", marker,
+                   place=marker_label(marker), marker=marker)
+        return
+
+    m = RE_PROMOTE.search(text)
+    if m:
+        EVENTS.add(ts, "promotion", m.group(1), player=m.group(1), rank=m.group(2).capitalize())
 
 
 def follow_logs_forever():
@@ -310,8 +445,10 @@ def follow_logs_forever():
                         handle_line(ts, m.group(2))
                 if time.time() - last_save > 10:
                     SESSIONS.save()
+                    EVENTS.save()
                     last_save = time.time()
             SESSIONS.save()
+            EVENTS.save()
         except Exception as e:
             LOG.follower_error = str(e)
             print(f"[logs] follower error: {e}", file=sys.stderr)
@@ -501,6 +638,12 @@ def build_players():
         r["lastSeen"] = max(r["lastSeen"] or seen, seen)
         if s["disconnectedAt"] is None:
             r["online"] = True
+    deaths = {}
+    for e in EVENTS.snapshot():
+        if e["type"] == "death":
+            deaths[e["player"]] = deaths.get(e["player"], 0) + 1
+    for r in roster.values():
+        r["deaths"] = deaths.get(r["name"], 0)
     # Cross-check "online" against the live A2S roster when available.
     a2s = cached_a2s()
     if a2s.get("ok"):
@@ -510,6 +653,15 @@ def build_players():
     players = sorted(roster.values(), key=lambda r: (-r["online"], -r["totalSeconds"]))
     earliest = min((s["connectedAt"] for s in sessions), default=None)
     return {"trackingSince": earliest, "generatedAt": iso(now), "players": players}
+
+
+def build_events(limit):
+    events = EVENTS.snapshot()
+    return {
+        "trackingSince": events[-1]["t"] if events else None,
+        "generatedAt": iso(now_utc()),
+        "events": events[:limit],
+    }
 
 
 def build_history(hours, bucket_minutes):
@@ -582,6 +734,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, build_telemetry())
             if path == "/api/players":
                 return self._send(200, build_players())
+            if path == "/api/events":
+                limit = max(1, min(500, int(q.get("limit", ["100"])[0])))
+                return self._send(200, build_events(limit))
             if path == "/api/history":
                 hours = max(1, min(24 * 30, int(q.get("hours", ["24"])[0])))
                 bucket = max(1, min(240, int(q.get("bucket", ["15"])[0])))
