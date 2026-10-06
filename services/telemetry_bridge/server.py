@@ -44,6 +44,9 @@ MAIN_CFG = os.environ.get("ARMA_MAIN_CFG", "/config/main.cfg")
 DATA_DIR = os.environ.get("TELEMETRY_DATA_DIR", "/data")
 SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")
 EVENTS_FILE = os.path.join(DATA_DIR, "events.json")
+# Map: positions can be served with a delay, and the rebel HQ hidden, for a public site.
+MAP_POSITION_DELAY = max(0, int(os.environ.get("MAP_POSITION_DELAY", "0") or 0))
+MAP_SHOW_HQ = os.environ.get("MAP_SHOW_HQ", "true").strip().lower() not in ("0", "false", "no")
 
 A2S_CACHE_SEC = 3.0
 
@@ -233,6 +236,118 @@ class EventStore:
 EVENTS = EventStore(EVENTS_FILE)
 
 
+class MapState:
+    """World map fed by the A3MAP lines of services/killfeed/functions/fn_map.sqf."""
+
+    SNAPSHOT_KEEP_SEC = 15 * 60
+
+    def __init__(self, data_dir):
+        self.data_dir = data_dir
+        self.lock = threading.Lock()
+        self.world = None           # {"name", "size", "grid"}
+        self.terrain_rows = {}      # row -> [part0, part1] while a dump is arriving
+        self.terrain = None         # {"world", "size", "grid", "rows"} once complete
+        self.towns = {}
+        self.zones = {}
+        self.hq = None
+        self.snapshots = []         # [(ts, [players])], oldest first
+        self.pending = None         # (tick, ts, expected, [players])
+
+    def _terrain_path(self, world):
+        return os.path.join(self.data_dir, f"map_terrain_{re.sub(r'[^A-Za-z0-9_]', '', world)}.json")
+
+    def load_terrain(self, world):
+        try:
+            with open(self._terrain_path(world)) as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return None
+        except Exception as e:
+            print(f"[map] could not load terrain: {e}", file=sys.stderr)
+            return None
+
+    def new_world(self, name, size, grid):
+        with self.lock:
+            self.world = {"name": name, "size": size, "grid": grid}
+            self.terrain_rows = {}
+            self.towns = {}
+            self.zones = {}
+            self.hq = None
+            self.pending = None
+            if not self.terrain or self.terrain.get("world") != name:
+                self.terrain = self.load_terrain(name)
+
+    def terrain_part(self, row, part, hexdata):
+        done = None
+        with self.lock:
+            if not self.world:
+                return
+            self.terrain_rows.setdefault(row, ["", ""])[part] = hexdata
+            grid = self.world["grid"]
+            if len(self.terrain_rows) == grid and all(a and b for a, b in self.terrain_rows.values()):
+                rows = [self.terrain_rows[r][0] + self.terrain_rows[r][1] for r in range(grid)]
+                self.terrain = done = {"world": self.world["name"], "size": self.world["size"], "grid": grid, "rows": rows}
+                self.terrain_rows = {}
+        if done:
+            os.makedirs(self.data_dir, exist_ok=True)
+            tmp = self._terrain_path(done["world"]) + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(done, f)
+            os.replace(tmp, self._terrain_path(done["world"]))
+
+    def player_tick(self, ts, tick, count):
+        with self.lock:
+            self.pending = (tick, ts, count, [])
+            self._maybe_commit()
+
+    def player(self, tick, p):
+        with self.lock:
+            if self.pending and self.pending[0] == tick:
+                self.pending[3].append(p)
+                self._maybe_commit()
+
+    def _maybe_commit(self):
+        tick, ts, count, players = self.pending
+        if len(players) >= count:
+            self.snapshots.append((ts, players))
+            self.pending = None
+            cutoff = ts.timestamp() - max(self.SNAPSHOT_KEEP_SEC, MAP_POSITION_DELAY + 120)
+            while self.snapshots and self.snapshots[0][0].timestamp() < cutoff:
+                self.snapshots.pop(0)
+
+    def view(self):
+        now = now_utc().timestamp()
+        with self.lock:
+            # Positions as of `delay` seconds ago; nothing if that snapshot is stale (server down).
+            target = now - MAP_POSITION_DELAY
+            snaps = [s for s in self.snapshots if s[0].timestamp() <= target]
+            current = snaps[-1] if snaps and target - snaps[-1][0].timestamp() <= 150 else None
+            players = [dict(p) for p in current[1]] if current else []
+            trails = {}
+            if current:
+                names = {p["name"] for p in players}
+                for ts, snap in snaps:
+                    if current[0].timestamp() - ts.timestamp() > 600:
+                        continue
+                    for p in snap:
+                        if p["name"] in names:
+                            trails.setdefault(p["name"], []).append([p["x"], p["y"]])
+            return {
+                "world": dict(self.world) if self.world else None,
+                "terrainAvailable": bool(self.terrain),
+                "towns": list(self.towns.values()),
+                "zones": list(self.zones.values()),
+                "hq": dict(self.hq) if (self.hq and MAP_SHOW_HQ) else None,
+                "players": players,
+                "trails": trails,
+                "playersAt": iso(current[0]) if current else None,
+                "delaySeconds": MAP_POSITION_DELAY,
+            }
+
+
+MAP = MapState(DATA_DIR)
+
+
 # ---------------------------------------------------------------------------
 # Log follower: FPS, Antistasi stats, HCs, player sessions
 # ---------------------------------------------------------------------------
@@ -275,6 +390,7 @@ RE_KILL = re.compile(
     r"A3KF\|1\|(man|veh)\|([^|]*)\|(\w*)\|(true|false)\|([^|]*)\|(\w*)\|(true|false)\|([^|]*)\|(-?\d+)\s*$"
 )
 RE_KILLFEED_INSTALLED = re.compile(r"A3KF\|installed\s*$")
+RE_MAP = re.compile(r"A3MAP\|1\|(\w+)\|(.*?)\s*$")
 
 
 def ids(s):
@@ -347,6 +463,36 @@ def handle_line(ts, text):
     handle_campaign_event(ts, text)
 
 
+def handle_map_record(ts, kind, f):
+    try:
+        if kind == "t" and len(f) == 3:
+            MAP.terrain_part(int(f[0]), int(f[1]), f[2])
+        elif kind == "tick" and len(f) == 2:
+            MAP.player_tick(ts, int(f[0]), int(f[1]))
+        elif kind == "p" and len(f) == 7:
+            MAP.player(int(f[0]), {"name": f[1], "x": int(f[2]), "y": int(f[3]), "dir": int(f[4]),
+                                   "vehicle": f[5] or None, "side": f[6] or None})
+        elif kind == "zone" and len(f) == 5:
+            marker, zkind, x, y, side = f
+            with MAP.lock:
+                prev = MAP.zones.get(marker)
+                MAP.zones[marker] = {"marker": marker, "kind": zkind, "x": int(x), "y": int(y), "side": side or None,
+                                     "label": marker_label(marker) if zkind != "city" else marker,
+                                     "changedAt": iso(ts) if prev and prev["side"] != (side or None) else
+                                                  (prev or {}).get("changedAt")}
+        elif kind == "hq" and len(f) == 2:
+            with MAP.lock:
+                MAP.hq = {"x": int(f[0]), "y": int(f[1])}
+        elif kind == "town" and len(f) == 4:
+            name, ttype, x, y = f
+            with MAP.lock:
+                MAP.towns[f"{name}|{x}|{y}"] = {"name": name, "type": ttype, "x": int(x), "y": int(y)}
+        elif kind == "world" and len(f) == 3:
+            MAP.new_world(f[0], float(f[1]), int(f[2]))
+    except ValueError:
+        pass  # malformed line; skip it
+
+
 def known_player_names():
     return {s["name"] for s in SESSIONS.snapshot()}
 
@@ -370,7 +516,13 @@ def marker_label(marker):
 
 def handle_campaign_event(ts, text):
     # Cheap pre-filter: every campaign line contains one of these.
-    if "was killed" not in text and "A3A_fnc_" not in text and "A3KF|" not in text:
+    if "was killed" not in text and "A3A_fnc_" not in text and "A3KF|" not in text and "A3MAP|" not in text:
+        return
+
+    if "A3MAP|" in text:
+        m = RE_MAP.search(text)
+        if m:
+            handle_map_record(ts, m.group(1), m.group(2).split("|"))
         return
 
     if "A3KF|" in text:
@@ -764,6 +916,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, build_telemetry())
             if path == "/api/players":
                 return self._send(200, build_players())
+            if path == "/api/map":
+                return self._send(200, MAP.view())
+            if path == "/api/map/terrain":
+                with MAP.lock:
+                    terrain = MAP.terrain
+                if not terrain:
+                    return self._send(404, {"error": "Terrain not exported yet"})
+                return self._send(200, terrain, cache="public, max-age=3600")
             if path == "/api/events":
                 limit = max(1, min(500, int(q.get("limit", ["100"])[0])))
                 return self._send(200, build_events(limit))

@@ -1,4 +1,22 @@
-# Kill feed (A3KF)
+# Kill feed and live map (A3KF)
+
+The `@a3kf` server addon has two parts: the kill feed below, and a map feed
+(`functions/fn_map.sqf`) for the website's live map.
+
+## Map feed
+
+On mission start it samples the terrain height on a 512×512 grid and logs it once (about 1,000
+short lines), then the world's named places. After Antistasi's `serverInitDone` it logs each
+zone's owner (from `sidesX`), the rebel HQ, and a player-position snapshot every 15 s (every 60 s
+while the server is empty). The bridge serves this as `/api/map` and `/api/map/terrain`; the
+terrain is also saved to `/data/map_terrain_<world>.json`.
+
+Privacy, in `.env` (restart only the bridge to apply):
+
+- `MAP_POSITION_DELAY`: seconds to delay player positions on the site (0 = live).
+- `MAP_SHOW_HQ`: `false` hides the rebel HQ marker.
+
+## Kill feed
 
 A server-side `EntityKilled` hook that writes one line per kill to the server log:
 
@@ -23,6 +41,9 @@ Writes `servermods/@a3kf/addons/a3kf.pbo` (loaded automatically at the next serv
 every `@` folder in `servermods/`) and `services/killfeed/zeus_snippet.sqf`.
 
 ## Enable on a running server (no restart)
+
+The snippet contains both the kill feed and the map feed.
+
 
 1. Join, open chat and `#login <admin password>`.
 2. Press **Y** for Zeus (the mission gives Zeus to the logged-in admin).

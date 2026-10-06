@@ -1,67 +1,17 @@
+// A3KF map feed for the telemetry bridge. Every record stays far below the ~1000 character
+// RPT line limit.
+//   A3MAP|1|world|worldName|worldSize|grid          once per mission start
+//   A3MAP|1|t|row|part|hex                           terrain: grid rows south to north, two halves
+//                                                    per row; byte 00 = sea, else 1 + height/1.5 m
+//   A3MAP|1|town|name|type|x|y                       named places from the world config
+//   A3MAP|1|zone|marker|kind|x|y|side                Antistasi zones; repeated when the owner changes
+//   A3MAP|1|hq|x|y                                   rebel HQ
+//   A3MAP|1|tick|id|count                            player snapshot header, then `count` lines:
+//   A3MAP|1|p|id|name|x|y|dir|vehicle|side
 if (!isServer) exitWith {};
-if (!isNil "A3KF_ehId") then {
-    removeMissionEventHandler ["EntityKilled", A3KF_ehId];
-};
-A3KF_ehId = addMissionEventHandler ["EntityKilled", {
-    params ["_unit", "_killer", "_instigator"];
-    private _isMan = _unit isKindOf "CAManBase";
-    if (!_isMan && {!(_unit isKindOf "AllVehicles")}) exitWith {};
-    if (isNull _instigator) then {
-        _instigator = _unit getVariable ["ace_medical_lastInstigator", objNull];
-    };
-    if (isNull _instigator && {!isNull _killer}) then {
-        _instigator = (UAVControl vehicle _killer) param [0, objNull];
-    };
-    if (isNull _instigator) then {
-        _instigator = _killer;
-    };
-    private _hasKiller = !isNull _instigator && {_instigator != _unit} && {!(_instigator in crew _unit)};
-    if (!_isMan && {!(_hasKiller && {isPlayer _instigator})}) exitWith {};
-    private _clean = { (_this splitString "|") joinString "/" };
-    private _sideName = {
-        switch (_this) do {
-            case west: { "WEST" };
-            case east: { "EAST" };
-            case resistance: { "GUER" };
-            case civilian: { "CIV" };
-            default { "" };
-        }
-    };
-    private _victim = if (_isMan) then { name _unit } else { getText (configFile >> "CfgVehicles" >> typeOf _unit >> "displayName") };
-    private _vSide = if (_isMan) then { side group _unit } else { side _unit };
-    private _kName = "";
-    private _kSide = "";
-    private _kPlayer = false;
-    private _weapon = "";
-    private _dist = -1;
-    if (_hasKiller) then {
-        _kName = name _instigator;
-        _kSide = (side group _instigator) call _sideName;
-        _kPlayer = isPlayer _instigator;
-        private _veh = vehicle _instigator;
-        _weapon = if (_veh != _instigator) then {
-            getText (configFile >> "CfgVehicles" >> typeOf _veh >> "displayName")
-        } else {
-            getText (configFile >> "CfgWeapons" >> currentWeapon _instigator >> "displayName")
-        };
-        _dist = round (_unit distance _instigator);
-    };
-    diag_log text format [
-        "A3KF|1|%1|%2|%3|%4|%5|%6|%7|%8|%9",
-        ["veh", "man"] select _isMan,
-        _victim call _clean,
-        _vSide call _sideName,
-        _isMan && {isPlayer _unit},
-        _kName call _clean,
-        _kSide,
-        _kPlayer,
-        _weapon call _clean,
-        _dist
-    ];
-}];
-diag_log text "A3KF|installed";
-if (!isServer) exitWith {};
+
 A3KF_mapGrid = 512;
+
 [] spawn {
     private _clean = { (_this splitString "|") joinString "/" };
     private _sideName = {
@@ -73,14 +23,18 @@ A3KF_mapGrid = 512;
             default { "" };
         }
     };
+
+    // --- World, terrain and towns (once) ---
     private _size = worldSize;
     private _n = A3KF_mapGrid;
     private _step = _size / _n;
     private _half = _n / 2;
     diag_log text format ["A3MAP|1|world|%1|%2|%3", worldName, _size, _n];
+
     private _digits = "0123456789abcdef" splitString "";
     private _hex = [];
     { private _hi = _x; { _hex pushBack (_hi + _x) } forEach _digits } forEach _digits;
+
     for "_r" from 0 to _n - 1 do {
         private _y = (_r + 0.5) * _step;
         for "_part" from 0 to 1 do {
@@ -92,6 +46,7 @@ A3KF_mapGrid = 512;
             diag_log text format ["A3MAP|1|t|%1|%2|%3", _r, _part, _cells joinString ""];
         };
     };
+
     {
         private _type = getText (_x >> "type");
         if (_type in ["NameCityCapital", "NameCity", "NameVillage", "NameLocal", "Airport"]) then {
@@ -103,7 +58,10 @@ A3KF_mapGrid = 512;
             };
         };
     } forEach ("true" configClasses (configFile >> "CfgWorlds" >> worldName >> "Names"));
+
+    // --- Antistasi zones: wait for the campaign to initialise ---
     waitUntil { sleep 5; !isNil "serverInitDone" && {!isNil "sidesX"} };
+
     private _kinds = [
         ["airportsX", "airbase"], ["milbases", "milbase"], ["outposts", "outpost"], ["seaports", "seaport"],
         ["factories", "factory"], ["resourcesX", "resource"], ["citiesX", "city"]
@@ -112,6 +70,7 @@ A3KF_mapGrid = 512;
     private _lastHq = [];
     private _nextZones = 0;
     private _tick = 0;
+
     while { true } do {
         if (time >= _nextZones) then {
             _nextZones = time + 30;
@@ -126,6 +85,7 @@ A3KF_mapGrid = 512;
                     };
                 } forEach (missionNamespace getVariable [_var, []]);
             } forEach _kinds;
+
             private _hq = markerPos "Synd_HQ";
             private _hqRounded = [round ((_hq select 0)), round ((_hq select 1))];
             if (!(_hqRounded isEqualTo _lastHq)) then {
@@ -133,6 +93,8 @@ A3KF_mapGrid = 512;
                 diag_log text format ["A3MAP|1|hq|%1|%2", (_hqRounded select 0), (_hqRounded select 1)];
             };
         };
+
+        // --- Player positions ---
         private _players = (allPlayers - entities "HeadlessClient_F") select { alive _x };
         _tick = _tick + 1;
         diag_log text format ["A3MAP|1|tick|%1|%2", _tick, count _players];
@@ -146,6 +108,8 @@ A3KF_mapGrid = 512;
                 _vehName call _clean, (side group _x) call _sideName
             ];
         } forEach _players;
+
+        // Every 15 s while someone is on, once a minute when the server is empty.
         sleep ([60, 15] select (count _players > 0));
     };
 };

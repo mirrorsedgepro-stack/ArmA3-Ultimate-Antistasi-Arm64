@@ -86,6 +86,8 @@ services:
       - SERVER_PUBLIC_IP=${SERVER_PUBLIC_IP:-180.181.238.103}
       - ARMA_CONTAINER_NAME=arma3_antistasi
       - HEADLESS_CLIENTS=${HEADLESS_CLIENTS:-3}
+      - MAP_POSITION_DELAY=${MAP_POSITION_DELAY:-0}
+      - MAP_SHOW_HQ=${MAP_SHOW_HQ:-true}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./configs/main.cfg:/config/main.cfg:ro
