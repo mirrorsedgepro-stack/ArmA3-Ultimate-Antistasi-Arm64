@@ -108,6 +108,55 @@ A3GM_fnc_mortar = {
     [true, format ["%1 rounds on grid %2 near %3", _rounds, mapGridPosition _aim, name _target]]
 };
 
+// Air strike on a map grid the caller names. args: [grid "EEENNN" (4/6/8 digits), player name or ""]
+// A friendly jet flies over and four 500 lb bombs land around the grid square's centre. Refused within
+// 200 m of any player (danger close) or off the map.
+A3GM_fnc_airstrike = {
+    params [["_grid", "", [""]], ["_name", "", [""]]];
+    _grid = (_grid splitString " ,.-") joinString "";
+    if !(count _grid in [4, 6, 8, 10]) exitWith { [false, format ["can't read grid %1", _grid]] };
+    private _pos = [];
+    private _found = [_grid, true] call BIS_fnc_gridToPos;
+    if (_found isEqualType [] && {count _found > 0} && {(_found select 0) isEqualType []}) then { _pos = _found select 0 };
+    if (_pos isEqualTo [] || {mapGridPosition _pos != _grid && {count _grid == 6}}) then {
+        // Fallback: Altis-style grids count 100 m squares from the south-west corner
+        private _half = count _grid / 2;
+        private _scale = 10 ^ (5 - _half);
+        private _try = [(parseNumber (_grid select [0, _half]) + 0.5) * _scale, (parseNumber (_grid select [_half, _half]) + 0.5) * _scale, 0];
+        if (count _grid != 6 || {mapGridPosition _try == _grid}) then { _pos = _try };
+    };
+    if (_pos isEqualTo []) exitWith { [false, format ["can't locate grid %1", _grid]] };
+    _pos = [_pos select 0, _pos select 1, 0];
+    if ((_pos select 0) < 0 || {(_pos select 1) < 0} || {(_pos select 0) > worldSize} || {(_pos select 1) > worldSize}) exitWith {
+        [false, format ["grid %1 is off the map", _grid]] };
+    private _close = (call A3GM_fnc_players) select { _x distance2D _pos < 200 };
+    if (_close isNotEqualTo []) exitWith {
+        [false, format ["danger close: %1 within 200 m of grid %2", (_close apply { name _x }) joinString ", ", _grid]] };
+
+    private _caller = [_name] call A3GM_fnc_target;
+    private _side = if (isNull _caller) then { missionNamespace getVariable ["teamPlayer", independent] } else { side group _caller };
+    private _jet = ["I_Plane_Fighter_03_dynamicLoadout_F", "I_Plane_Fighter_04_F", "B_Plane_CAS_01_dynamicLoadout_F"]
+        select { isClass (configFile >> "CfgVehicles" >> _x) } param [0, ""];
+    private _dir = random 360;
+    if (_jet != "") then {
+        private _from = _pos getPos [4000, _dir + 180]; _from set [2, 250];
+        private _to = _pos getPos [4000, _dir]; _to set [2, 250];
+        [_from, _to, 250, "FULL", _jet, _side] call BIS_fnc_ambientFlyby;
+    };
+    [_pos] spawn {
+        params ["_pos"];
+        sleep 22;  // the jet is over the target about now
+        for "_i" from 1 to 4 do {
+            private _p = _pos getPos [random 45, random 360];
+            _p set [2, 120];
+            private _bomb = createVehicle ["Bo_GBU12_LGB", _p, [], 0, "CAN_COLLIDE"];
+            _bomb setVelocity [0, 0, -90];
+            sleep 0.4;
+        };
+    };
+    [true, format ["air strike on grid %1 (%2), impact in about 25 seconds", _grid, mapGridPosition _pos]]
+};
+
 // args: [overcast 0-1, rain 0-1, fog 0-0.5]
 A3GM_fnc_weather = {
     params [["_overcast", 0.5, [0]], ["_rain", 0, [0]], ["_fog", 0, [0]]];
@@ -358,6 +407,31 @@ A3GM_fnc_mission = {
     [true, (_new select 0) call A3GM_fnc_taskSummary]
 };
 
+// Newcomer-friendly TFAR: the rebels' default handheld (AN/PRC-154) only reaches about 2 km. Unlock the
+// 5 km AN/PRC-148 JEM and the 20 km AN/PRC-155 backpacks in the arsenal (unlimited, like any Antistasi
+// unlock) and make the 148 JEM what TFAR hands out for "ItemRadio", server-forced.
+A3GM_fnc_betterRadios = {
+    if !(isClass (configFile >> "CfgPatches" >> "tfar_core")) exitWith {};
+    private _unlocked = [];
+    {
+        if ((isClass (configFile >> "CfgWeapons" >> _x) || {isClass (configFile >> "CfgVehicles" >> _x)}) && {!isNil "A3A_fnc_unlockEquipment"}) then {
+            [_x] call A3A_fnc_unlockEquipment;
+            _unlocked pushBack _x;
+        };
+    } forEach ["TFAR_anprc148jem", "TFAR_anprc155", "TFAR_anprc155_coyote"];
+    if (!isNil "CBA_settings_fnc_set") then {
+        {
+            _x params ["_setting", "_value"];
+            [_setting, _value, 2, "server"] call CBA_settings_fnc_set;
+        } forEach [
+            ["TFAR_DefaultRadio_Rifleman_Independent", "TFAR_anprc148jem"],
+            ["TFAR_DefaultRadio_Personal_Independent", "TFAR_anprc148jem"],
+            ["TFAR_DefaultRadio_Backpack_Independent", "TFAR_anprc155"]
+        ];
+    };
+    diag_log text format ["A3GM|radios|unlocked %1; default handheld TFAR_anprc148jem", _unlocked joinString ", "];
+};
+
 A3GM_actions = createHashMapFromArray [
     ["SAY", A3GM_fnc_say],
     ["AIRDROP", A3GM_fnc_airdrop],
@@ -367,7 +441,8 @@ A3GM_actions = createHashMapFromArray [
     ["STATUS", A3GM_fnc_status],
     ["INTEL", A3GM_fnc_intel],
     ["MISSION", A3GM_fnc_mission],
-    ["SITREP", A3GM_fnc_sitrep]
+    ["SITREP", A3GM_fnc_sitrep],
+    ["AIRSTRIKE", A3GM_fnc_airstrike]
 ];
 
 // Chat relay. Each player's client sends the chat its own player types here; the sender comes
@@ -470,6 +545,7 @@ A3GM_chatTrace = true; publicVariable "A3GM_chatTrace";  // TODO: off once chat 
 [] spawn {
     // Antistasi's own server init has to finish first (factions, sides).
     waitUntil { sleep 2; missionNamespace getVariable ["serverInitDone", false] };
+    call A3GM_fnc_betterRadios;
     diag_log text "A3GM|ready";
     while { true } do {
         private _raw = "a3gm" callExtension "poll";
