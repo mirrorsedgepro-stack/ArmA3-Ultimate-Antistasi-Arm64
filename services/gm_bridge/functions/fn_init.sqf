@@ -112,15 +112,19 @@ A3GM_fnc_mortar = {
 A3GM_fnc_gridPos = {
     private _grid = _this;
     if !(count _grid in [4, 6, 8, 10]) exitWith { format ["can't read grid %1", _grid] };
-    private _pos = [];
-    private _found = [_grid, true] call BIS_fnc_gridToPos;
-    if (_found isEqualType [] && {count _found > 0} && {(_found select 0) isEqualType []}) then { _pos = _found select 0 };
-    if (_pos isEqualTo [] || {mapGridPosition _pos != _grid && {count _grid == 6}}) then {
-        // Fallback: Altis-style grids count 100 m squares from the south-west corner
-        private _half = count _grid / 2;
-        private _scale = 10 ^ (5 - _half);
-        private _try = [(parseNumber (_grid select [0, _half]) + 0.5) * _scale, (parseNumber (_grid select [_half, _half]) + 0.5) * _scale, 0];
-        if (count _grid != 6 || {mapGridPosition _try == _grid}) then { _pos = _try };
+    private _half = count _grid / 2;
+    // Altis-style grids count squares from the south-west corner (100 m for 6 digits, 10 m for 8). Checked
+    // against the map's own 6-digit grid; BIS_fnc_gridToPos is only a fallback (it returns no usable
+    // position for 8/10-digit grids).
+    private _scale = 10 ^ (5 - _half);
+    private _pos = [(parseNumber (_grid select [0, _half]) + 0.5) * _scale, (parseNumber (_grid select [_half, _half]) + 0.5) * _scale, 0];
+    private _n = 3 min _half;
+    private _check = mapGridPosition _pos;
+    if ((_check select [0, _n]) + (_check select [3, _n]) != (_grid select [0, _n]) + (_grid select [_half, _n])) then {
+        _pos = [];
+        private _found = [_grid select [0, _n] + (_grid select [_half, _n]), true] call BIS_fnc_gridToPos;
+        if (_found isEqualType [] && {count _found > 0} && {(_found select 0) isEqualType []}) then { _pos = _found select 0 };
+        if (_pos isNotEqualTo [] && {mapGridPosition _pos != (_grid select [0, _n]) + (_grid select [_half, _n])}) then { _pos = [] };
     };
     if (_pos isEqualTo []) exitWith { format ["can't locate grid %1", _grid] };
     _pos = [_pos select 0, _pos select 1, 0];
