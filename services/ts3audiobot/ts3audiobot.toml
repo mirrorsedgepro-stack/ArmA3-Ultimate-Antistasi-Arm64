@@ -1,0 +1,30 @@
+# Missing keys are filled in with defaults by the bot on first start.
+[bot]
+run = false
+
+[configs]
+bots_path = "bots"
+send_stats = false
+
+[db]
+path = "ts3audiobot.db"
+
+[factories]
+media = { path = "/audio" }
+
+[tools.ffmpeg]
+path = "ffmpeg"
+
+[rights]
+path = "rights.toml"
+
+[web]
+# Host networking: listen on loopback only. The Game Master calls the API from the same host.
+hosts = ["127.0.0.1"]
+port = 58913
+
+[web.api]
+enabled = true
+
+[web.interface]
+enabled = false

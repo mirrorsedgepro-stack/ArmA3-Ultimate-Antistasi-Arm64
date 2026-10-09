@@ -95,7 +95,7 @@ This runs pre-flight checks (verifying `.env` and configuring `binfmt` on ARM64 
 
 ### 4. Follow Initial Startup & Mod Downloads
 
-On first launch, SteamCMD will download the Arma 3 server binary (~5 GB) and all 42 Workshop mods (~30 GB). You can stream live progress:
+On first launch, SteamCMD will download the Arma 3 server binary (~5 GB) and all 41 Workshop mods (~30 GB). You can stream live progress:
 
 ```bash
 ./scripts/manage.sh logs
@@ -114,7 +114,7 @@ Your server and all Headless Clients are live!
 
 ## Client Connection & Mod Sync
 
-Joining players can synchronize all 42 required mods in seconds:
+Joining players can synchronize all 41 required mods in seconds:
 
 1. Send the [configs/preset.html](file:///home/jcee-slave/ArmaA/configs/preset.html) file to your players.
 2. In the official **Arma 3 Launcher**:
@@ -123,6 +123,25 @@ Joining players can synchronize all 42 required mods in seconds:
    - Select `preset.html`.
 3. The launcher will automatically prompt players to subscribe to and download any missing mods from the Steam Workshop. The full modset (RHS, Antistasi Ultimate, ACE, JSRS, Blastcore and the rest) is listed in `configs/preset.html`, the single source of truth for the server's mods.
 4. Players launch Arma 3 with the preset loaded, go to **Server Browser** &rarr; **Direct Connect**, and enter your server IP and port `2302`.
+
+### TeamSpeak & TFAR
+
+Radios use Task Force Arrowhead Radio, so players also need TeamSpeak 3:
+
+1. Install the TFAR TeamSpeak plugin that ships with the Workshop mod: double-click
+   `!Workshop/@Task Force Arrowhead Radio (BETA!!!)/teamspeak/task_force_radio.ts3_plugin` (TeamSpeak closed).
+2. Connect TeamSpeak to the server's IP (port `9987`), then join the Arma server. TFAR moves you into the
+   `TaskForceRadio` channel automatically.
+
+`[HQ] OVERLORD` in that channel is the OpenClaw Game Master's voice (`~/openclaw-gm`): it narrates the
+campaign over TeamSpeak and in system chat, and can drop supplies, call mortar fire on enemies near you,
+send enemy patrols and change the weather. See `services/gm_bridge/README.md`.
+
+The TeamSpeak admin privilege key is printed once, on the server's first start:
+
+```bash
+docker logs teamspeak_server 2>&1 | grep token=
+```
 
 ---
 
@@ -137,10 +156,15 @@ Because `network_mode: host` is enabled for optimal 32-player UDP throughput, en
 | **2304** | UDP | Steam Master / Reporting |
 | **2305** | UDP | VON (In-Game Voice) |
 | **2306** | UDP | BattlEye Anti-Cheat |
+| **9987** | UDP | TeamSpeak 3 voice (TFAR) |
+| **30033** | TCP | TeamSpeak 3 file transfer (optional) |
+
+Keep TeamSpeak's ServerQuery (`10011`/`10022` TCP) and the voice bot's API (`58913`, loopback only) closed to the internet.
 
 On Ubuntu/Debian host:
 ```bash
 sudo ufw allow 2302:2306/udp
+sudo ufw allow 9987/udp
 ```
 
 ---
@@ -198,3 +222,4 @@ Antistasi saves campaign progress into `./configs/profiles/`.
   ```cron
   0 */4 * * * /home/jcee-slave/ArmaA/scripts/backup_campaign.sh >/dev/null 2>&1
   ```
+

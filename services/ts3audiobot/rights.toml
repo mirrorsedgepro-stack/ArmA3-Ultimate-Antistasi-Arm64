@@ -1,0 +1,7 @@
+# Only local web API calls (the Game Master) may control the bot. TeamSpeak users get nothing,
+# so nobody can make it play arbitrary links.
+"+" = [ "cmd.help.*", "cmd.version" ]
+
+[[rule]]
+	ip = [ "127.0.0.1", "::1" ]
+	"+" = "*"

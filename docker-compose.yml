@@ -38,6 +38,9 @@ services:
       - steam_data:/root/Steam
       - steam_root:/root/.steam
 
+      # OpenClaw Game Master command spool, read by the @a3gm server addon (services/gm_bridge)
+      - ./gm_spool:/arma3/gm_spool
+
   telemetry_bridge:
     build:
       context: ./services/telemetry_bridge
@@ -66,6 +69,42 @@ services:
       - ./configs/main.cfg:/config/main.cfg:ro
       - telemetry_data:/data
 
+  # TeamSpeak 3 for TFAR. x86-only image: runs under the host's QEMU binfmt (scripts/setup_binfmt.sh).
+  # The free license allows 32 slots, and the Game Master's voice bot takes one of them.
+  teamspeak:
+    image: teamspeak:3.13
+    platform: linux/amd64
+    container_name: teamspeak_server
+    cpuset: "0-4,10-14"
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - TS3SERVER_LICENSE=accept
+      - TS3SERVER_SERVERADMIN_PASSWORD=${TS3_SERVERADMIN_PASSWORD:?set TS3_SERVERADMIN_PASSWORD in .env}
+    volumes:
+      - teamspeak_data:/var/ts3server
+
+  # The Game Master's voice: a TeamSpeak client that plays openclaw-gm's rendered transmissions.
+  ts3audiobot:
+    build:
+      context: ./services/ts3audiobot
+    image: armaa-ts3audiobot:latest
+    container_name: ts3audiobot
+    cpuset: "0-4,10-14"
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - teamspeak
+    environment:
+      - TS3AB_NAME=${TS3_BOT_NAME:-[HQ] OVERLORD}
+      - TS3AB_CHANNEL=${TS3_BOT_CHANNEL:-TaskForceRadio}
+      - TS3AB_CHANNEL_PASSWORD=${TS3_BOT_CHANNEL_PASSWORD:-123}
+    volumes:
+      - ts3audiobot_data:/data
+      - ${GM_AUDIO_DIR:-../openclaw-gm/output}:/audio:ro
+      # Players' utterances for the Game Master to transcribe (plugins/OpenClawEars.cs)
+      - ${GM_VOICE_DIR:-../openclaw-gm/voice_in}:/voice_in
+
 volumes:
   server_base:
     name: armaa_server_base
@@ -82,4 +121,5 @@ volumes:
   steam_data:
   steam_root:
   telemetry_data:
-
+  teamspeak_data:
+  ts3audiobot_data:

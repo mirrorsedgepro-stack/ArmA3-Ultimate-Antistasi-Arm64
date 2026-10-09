@@ -1,0 +1,20 @@
+run = true
+# Both need permissions the bot lacks and are pointless for a radio voice.
+set_status_description = false
+generate_status_avatar = false
+
+[connect]
+address = "@ADDRESS@"
+channel = "@CHANNEL@"
+name = "@NAME@"
+channel_password = { pw = "@CHANNEL_PASSWORD@", hashed = false, autohash = false }
+
+[audio]
+volume = { default = 60.0, min = 25.0, max = 100.0 }
+bitrate = 48
+# Whisper to everyone in the parent (TFAR) channel. Re-applied at every track start, so it has to be
+# the configured mode: TFAR mutes non-game clients inside a living player's own channel.
+send_mode = "!whisper group AllClients ParentChannel"
+
+[commands]
+color = false

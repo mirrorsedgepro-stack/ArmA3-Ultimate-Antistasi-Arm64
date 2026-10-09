@@ -21,3 +21,6 @@ missions/*.pbo
 
 # Python bytecode
 __pycache__/
+gm_spool/
+mods_disabled/
+/plugins/

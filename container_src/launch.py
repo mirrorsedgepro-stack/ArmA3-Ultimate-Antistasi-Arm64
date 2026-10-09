@@ -171,4 +171,8 @@ if os.path.exists("servermods"):
     launch += mod_param("serverMod", local.mods("servermods"))
 
 print("LAUNCHING ARMA SERVER WITH", launch, flush=True)
-os.system(launch)
+exit_code = os.system(launch)
+import sys
+sys.exit(exit_code >> 8 if exit_code != 0 else 0)
+
+
