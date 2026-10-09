@@ -42,8 +42,10 @@ def pack_pbo(path, prefix, files):
     body = header + b"".join(blobs)
     body += b"\0" + hashlib.sha1(body).digest()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as f:
+    # Write beside it and rename: the running server keeps the old file open until its next start
+    with open(path + ".tmp", "wb") as f:
         f.write(body)
+    os.replace(path + ".tmp", path)
 
 
 def compile_so():
@@ -64,7 +66,10 @@ def main():
         compile_so()
     pbo = os.path.join(MOD, "addons", "a3gm.pbo")
     pack_pbo(pbo, PREFIX, FILES)
-    shutil.copy2(SO, os.path.join(MOD, "a3gm_x64.so"))
+    # Same for the extension: overwriting a loaded .so in place can crash the running server
+    so_dst = os.path.join(MOD, "a3gm_x64.so")
+    shutil.copy2(SO, so_dst + ".tmp")
+    os.replace(so_dst + ".tmp", so_dst)
     print(f"wrote {os.path.relpath(pbo, ROOT)} ({os.path.getsize(pbo)} bytes)")
     print(f"wrote {os.path.relpath(os.path.join(MOD, 'a3gm_x64.so'), ROOT)}")
 

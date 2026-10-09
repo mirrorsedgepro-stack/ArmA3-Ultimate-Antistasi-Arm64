@@ -108,13 +108,10 @@ A3GM_fnc_mortar = {
     [true, format ["%1 rounds on grid %2 near %3", _rounds, mapGridPosition _aim, name _target]]
 };
 
-// Air strike on a map grid the caller names. args: [grid "EEENNN" (4/6/8 digits), player name or ""]
-// A friendly jet flies over and four 500 lb bombs land around the grid square's centre. Refused within
-// 200 m of any player (danger close) or off the map.
-A3GM_fnc_airstrike = {
-    params [["_grid", "", [""]], ["_name", "", [""]]];
-    _grid = (_grid splitString " ,.-") joinString "";
-    if !(count _grid in [4, 6, 8, 10]) exitWith { [false, format ["can't read grid %1", _grid]] };
+// Map grid "EEENNN" (4/6/8/10 digits) -> [x, y, 0], or a string saying why not.
+A3GM_fnc_gridPos = {
+    private _grid = _this;
+    if !(count _grid in [4, 6, 8, 10]) exitWith { format ["can't read grid %1", _grid] };
     private _pos = [];
     private _found = [_grid, true] call BIS_fnc_gridToPos;
     if (_found isEqualType [] && {count _found > 0} && {(_found select 0) isEqualType []}) then { _pos = _found select 0 };
@@ -125,10 +122,21 @@ A3GM_fnc_airstrike = {
         private _try = [(parseNumber (_grid select [0, _half]) + 0.5) * _scale, (parseNumber (_grid select [_half, _half]) + 0.5) * _scale, 0];
         if (count _grid != 6 || {mapGridPosition _try == _grid}) then { _pos = _try };
     };
-    if (_pos isEqualTo []) exitWith { [false, format ["can't locate grid %1", _grid]] };
+    if (_pos isEqualTo []) exitWith { format ["can't locate grid %1", _grid] };
     _pos = [_pos select 0, _pos select 1, 0];
     if ((_pos select 0) < 0 || {(_pos select 1) < 0} || {(_pos select 0) > worldSize} || {(_pos select 1) > worldSize}) exitWith {
-        [false, format ["grid %1 is off the map", _grid]] };
+        format ["grid %1 is off the map", _grid] };
+    _pos
+};
+
+// Air strike on a map grid the caller names. args: [grid "EEENNN" (4/6/8 digits), player name or ""]
+// A friendly jet flies over and four 500 lb bombs land around the grid square's centre. Refused within
+// 200 m of any player (danger close) or off the map.
+A3GM_fnc_airstrike = {
+    params [["_grid", "", [""]], ["_name", "", [""]]];
+    _grid = (_grid splitString " ,.-") joinString "";
+    private _pos = _grid call A3GM_fnc_gridPos;
+    if (_pos isEqualType "") exitWith { [false, _pos] };
     private _close = (call A3GM_fnc_players) select { _x distance2D _pos < 200 };
     if (_close isNotEqualTo []) exitWith {
         [false, format ["danger close: %1 within 200 m of grid %2", (_close apply { name _x }) joinString ", ", _grid]] };
@@ -155,6 +163,90 @@ A3GM_fnc_airstrike = {
         };
     };
     [true, format ["air strike on grid %1 (%2), impact in about 25 seconds", _grid, mapGridPosition _pos]]
+};
+
+// Battle net: contacts reported to Overlord, marked on the map of the reporter's side only. The addon is
+// server-only, so each client draws its own local marker (remoteExec to that side, JIP id = marker name:
+// late joiners get the current version, re-marking replaces it). Faded after A3GM_markFade s, removed after
+// A3GM_markLife s, at most A3GM_markMax at once (oldest go first).
+A3GM_marks = createHashMap;  // id -> [marker name, side, created (time), draw args, faded flag once faded]
+A3GM_markFade = 600;
+A3GM_markLife = 900;
+A3GM_markMax = 25;
+A3GM_fnc_markDraw = {
+    // Runs on the clients. args: [marker name, pos, type, text, alpha]
+    params ["_name", "_pos", "_type", "_text", "_alpha"];
+    deleteMarkerLocal _name;
+    private _m = createMarkerLocal [_name, _pos];
+    _m setMarkerTypeLocal _type;
+    _m setMarkerColorLocal "ColorOPFOR";
+    _m setMarkerTextLocal _text;
+    _m setMarkerAlphaLocal _alpha;
+};
+A3GM_fnc_markSend = {
+    params ["_name", "_side", "_args"];
+    [_args, A3GM_fnc_markDraw] remoteExec ["spawn", _side, _name];  // "spawn": as the chat hook, allowed by the mission
+};
+A3GM_fnc_markRemove = {
+    params ["_id"];
+    private _entry = A3GM_marks getOrDefault [_id, []];
+    if (_entry isEqualTo []) exitWith { false };
+    private _name = _entry select 0;
+    remoteExec ["", _name];  // drop it from the JIP queue
+    [[_name], { deleteMarkerLocal (_this select 0) }] remoteExec ["spawn", 0];
+    A3GM_marks deleteAt _id;
+    true
+};
+
+// args: [id, grid (8 digits), NATO type (o_inf, o_armor, ...), text, reporter name or ""]
+A3GM_fnc_mark = {
+    params [["_id", "", [""]], ["_grid", "", [""]], ["_type", "o_unknown", [""]], ["_text", "", [""]], ["_name", "", [""]]];
+    if (_id isEqualTo "" || {(_id regexFind ["[^A-Za-z0-9_]"]) isNotEqualTo []}) exitWith { [false, "bad id"] };
+    if !(_type in ["o_inf", "o_motor_inf", "o_mech_inf", "o_armor", "o_air", "o_naval", "o_art", "o_recon",
+                   "o_installation", "o_unknown"]) then { _type = "o_unknown" };
+    private _pos = _grid call A3GM_fnc_gridPos;
+    if (_pos isEqualType "") exitWith { [false, _pos] };
+    private _players = call A3GM_fnc_players;
+    private _idx = _players findIf { name _x == _name };
+    private _side = if (_idx >= 0) then { side group (_players select _idx) } else { missionNamespace getVariable ["teamPlayer", independent] };
+    private _marker = format ["A3GM_contact_%1", _id];
+    private _label = format ["%1 %2", [daytime, "HH:MM"] call BIS_fnc_timeToString, (_text select [0, 60]) call A3GM_fnc_clean];
+    [_id] call A3GM_fnc_markRemove;  // an update: replace it (it may have moved)
+    // Over the cap: the oldest goes
+    if (count A3GM_marks >= A3GM_markMax) then {
+        private _oldest = ""; private _t = 1e10;
+        { if ((_y select 2) < _t) then { _t = _y select 2; _oldest = _x } } forEach A3GM_marks;
+        if (_oldest != "") then { [_oldest] call A3GM_fnc_markRemove };
+    };
+    A3GM_marks set [_id, [_marker, _side, time, [_marker, _pos, _type, _label]]];
+    [_marker, _side, [_marker, _pos, _type, _label, 1]] call A3GM_fnc_markSend;
+    [true, format ["marked %1 at %2 for %3", _id, mapGridPosition _pos, _side call A3GM_fnc_sideName]]
+};
+
+// args: [id]
+A3GM_fnc_unmark = {
+    params [["_id", "", [""]]];
+    if ([_id] call A3GM_fnc_markRemove) then { [true, format ["removed %1", _id]] } else { [false, format ["no marker %1", _id]] }
+};
+
+// Fade and expire contact markers
+[] spawn {
+    waitUntil { sleep 5; missionNamespace getVariable ["serverInitDone", false] };
+    while { true } do {
+        sleep 30;
+        {
+            _y params ["_name", "_side", "_created", "_draw"];
+            private _age = time - _created;
+            if (_age > A3GM_markLife) then {
+                [_x] call A3GM_fnc_markRemove;
+            } else {
+                if (_age > A3GM_markFade && {count _y < 5}) then {
+                    (A3GM_marks get _x) pushBack true;  // faded once (_y is the copy's)
+                    [_name, _side, _draw + [0.45]] call A3GM_fnc_markSend;
+                };
+            };
+        } forEach +A3GM_marks;
+    };
 };
 
 // args: [overcast 0-1, rain 0-1, fog 0-0.5]
@@ -442,7 +534,9 @@ A3GM_actions = createHashMapFromArray [
     ["INTEL", A3GM_fnc_intel],
     ["MISSION", A3GM_fnc_mission],
     ["SITREP", A3GM_fnc_sitrep],
-    ["AIRSTRIKE", A3GM_fnc_airstrike]
+    ["AIRSTRIKE", A3GM_fnc_airstrike],
+    ["MARK", A3GM_fnc_mark],
+    ["UNMARK", A3GM_fnc_unmark]
 ];
 
 // Chat relay. Each player's client sends the chat its own player types here; the sender comes

@@ -18,6 +18,9 @@ RCON. BattlEye RCON can't run SQF, so the bridge is a server-only addon instead:
 | `QRF` | player, size 2-8 | occupant infantry (from `A3A_faction_occ` unit classes) 500-700 m out, search-and-destroy on the player; cleaned up when dead or after 30 min with no player near |
 | `STATUS` | – | `name@grid:enemiesWithin800m;…` |
 | `INTEL` | player | readable report: grid, nearest town, enemies within 800 m (closest bearing/distance), 3 nearest enemy zones, active Antistasi missions (`A3A_tasksData`) |
+| `AIRSTRIKE` | grid (4-10 digits), player | friendly jet flyby and four 500 lb bombs around the grid; refused within 200 m of any player |
+| `MARK` | id, grid, NATO type (`o_inf`, `o_motor_inf`, `o_mech_inf`, `o_armor`, `o_air`, `o_naval`, `o_art`, `o_recon`, `o_installation`, `o_unknown`), text, reporter | battle net: a contact marker (`HH:MM text`, ColorOPFOR) on the map of the reporter's side only (local markers via JIP `remoteExec`); the same id again replaces it. Faded after 10 min, removed after 15, at most 25 (oldest go) |
+| `UNMARK` | id | removes a contact marker |
 | `MISSION` | type (`AS`/`CON`/`DES`/`LOG`/`SUPP`/`RES`/`CONVOY`/`RAN`), player | starts an Antistasi mission via `A3A_fnc_missionRequest` (as Petros does) and returns the new task, or why not |
 
 An empty player name means "the player with the most enemies nearby". Every command logs one
