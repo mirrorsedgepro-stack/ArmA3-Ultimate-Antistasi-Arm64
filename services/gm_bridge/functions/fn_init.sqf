@@ -284,6 +284,7 @@ A3GM_fnc_supportTarget = {
     private _u = _grp createUnit ["I_G_Soldier_F", _pos, [], 0, "NONE"];
     _u setDamage 0.5;
     _u disableAI "PATH";
+    _u setVariable ["A3GM_standin", true];  // boards a landed helicopter by itself (it can't walk to it)
     [_u] spawn { sleep 1200; deleteVehicle (_this select 0) };
     diag_log text format ["A3GM|test|stand-in at %1", mapGridPosition _u];
     _u
@@ -347,9 +348,61 @@ A3GM_fnc_medevacLand = {
     alive _heli && {alive driver _heli} && {isTouchingGround _heli}
 };
 
+// Passengers: everyone aboard who isn't the helicopter's own crew
+A3GM_fnc_heliPassengers = {
+    params ["_heli"];
+    private _crew = units group driver _heli;
+    (crew _heli) select { !(_x in _crew) && {alive _x} }
+};
+
+// Wait for the person who called it, then for everyone else close by who's coming along: any player within
+// 75 m of the helicopter, and their AI squadmates, until they're all aboard (up to _extra s more).
+// Returns the number of passengers aboard.
+A3GM_fnc_heliBoard = {
+    params ["_heli", "_target", ["_timeout", 180], ["_extra", 45]];
+    private _end = time + _timeout;
+    waitUntil {
+        sleep 2;
+        if (_target getVariable ["A3GM_standin", false] && {vehicle _target != _heli} && {_target distance2D _heli < 300}) then {
+            _target moveInCargo _heli;
+        };
+        !alive _heli || {vehicle _target == _heli} || {time > _end}
+    };
+    if (!alive _heli || {vehicle _target != _heli}) exitWith { 0 };
+    private _end2 = time + _extra;
+    waitUntil {
+        sleep 3;
+        private _coming = (call A3GM_fnc_players) select { alive _x && {_x distance2D _heli < 75} && {vehicle _x != _heli} };
+        { _coming append ((units group _x) select { !isPlayer _x && {alive _x} && {_x distance2D _heli < 75} && {vehicle _x != _heli} }) }
+            forEach +_coming;
+        !alive _heli || {_coming isEqualTo []} || {time > _end2}
+    };
+    sleep 3;  // the last one in, doors closing
+    count ([_heli] call A3GM_fnc_heliPassengers)
+};
+
+// Get every passenger out, again and again (slow or unconscious ones), until nobody is left aboard. True if
+// empty; false after _timeout (the helicopter then stays down rather than fly off with someone).
+A3GM_fnc_heliUnload = {
+    params ["_heli", ["_timeout", 300]];
+    private _end = time + _timeout;
+    waitUntil {
+        {
+            [[_x], { params ["_u"]; unassignVehicle _u; moveOut _u }] remoteExec ["spawn", _x];
+        } forEach ([_heli] call A3GM_fnc_heliPassengers);
+        sleep 3;
+        !alive _heli || {([_heli] call A3GM_fnc_heliPassengers) isEqualTo []} || {time > _end}
+    };
+    { if (!alive _x) then { moveOut _x } } forEach crew _heli;  // nobody's body flies away either
+    ([_heli] call A3GM_fnc_heliPassengers) isEqualTo []
+};
+
 A3GM_fnc_medevacLeave = {
     params ["_heli", "_from"];
     if (!alive _heli) exitWith {};
+    if (isTouchingGround _heli && {([_heli] call A3GM_fnc_heliPassengers) isNotEqualTo []}) then {
+        [_heli, 120] call A3GM_fnc_heliUnload;  // last check before lifting off with someone aboard
+    };
     private _grp = group driver _heli;
     _heli land "NONE";
     _grp move (_from getPos [4000, (_heli getDir _from) + 180]);
@@ -422,7 +475,7 @@ A3GM_fnc_medevac = {
         waitUntil {
             sleep 2;
             if (alive _target && {vehicle _target != _heli} && {_target distance2D _heli < 80}
-                && {(_target call A3GM_fnc_condition) in ["unconscious", "bleeding"]}) then {
+                && {(_target call A3GM_fnc_condition) in ["unconscious", "bleeding"] || {_target getVariable ["A3GM_standin", false]}}) then {
                 [[_target, _heli], { params ["_u", "_h"]; _u moveInCargo _h }] remoteExec ["spawn", _target];
             };
             !alive _heli || {!alive _target} || {vehicle _target == _heli} || {time > _end}
@@ -431,17 +484,19 @@ A3GM_fnc_medevac = {
             [_id, "failed", _target, ["casualty didn't board", "lost"] select (!alive _heli)] call A3GM_fnc_medevacLog;
             [_heli, _lz] call A3GM_fnc_medevacLeave;
         };
-        [_id, "aboard", _target, ""] call A3GM_fnc_medevacLog;
+        // anyone else coming along (squadmates escorting the casualty)
+        private _aboard = [_heli, _target, 5, 30] call A3GM_fnc_heliBoard;
+        [_id, "aboard", _target, str _aboard] call A3GM_fnc_medevacLog;
         [_target] call A3GM_fnc_medevacHeal;  // the crew medic works on them in flight
-        sleep 3;
         [_id, "wheelsup", _target, "hq"] call A3GM_fnc_medevacLog;
         private _hqLz = [_hq, 200] call A3GM_fnc_medevacLZ;
         if !([_heli, _hqLz, 600] call A3GM_fnc_medevacLand) exitWith {
             [_id, "failed", _target, ["could not land at HQ", "lost"] select (!alive _heli)] call A3GM_fnc_medevacLog;
             [_heli, _lz] call A3GM_fnc_medevacLeave;
         };
-        { if (isPlayer _x) then { [[_x], { moveOut (_this select 0) }] remoteExec ["spawn", _x] } } forEach crew _heli;
-        sleep 4;
+        if !([_heli] call A3GM_fnc_heliUnload) then {
+            [_id, "diag", _target, "passengers still aboard at HQ"] call A3GM_fnc_medevacLog;
+        };
         [_id, "hq", _target, mapGridPosition _heli] call A3GM_fnc_medevacLog;
         [_heli, _hqLz] call A3GM_fnc_medevacLeave;
         [_id, "done", _target, ""] call A3GM_fnc_medevacLog;
@@ -568,8 +623,7 @@ A3GM_fnc_backup = {
                 ["backup", _id, "lost", _target, "helicopter"] call A3GM_fnc_supportLog;
                 [_heli, _lz] call A3GM_fnc_medevacLeave;
             };
-            { unassignVehicle _x; moveOut _x } forEach units _squad;
-            sleep 4;
+            [_heli] call A3GM_fnc_heliUnload;
             ["backup", _id, "arrived", _target, mapGridPosition _lz] call A3GM_fnc_supportLog;
             [_heli, _lz] call A3GM_fnc_medevacLeave;
             ["backup", _id, _target, _squad] call A3GM_fnc_backupEscort;
@@ -643,8 +697,7 @@ A3GM_fnc_backup = {
                 ["backup", _id, "lost", _target, "helicopter"] call A3GM_fnc_supportLog;
                 [_heli, _lz] call A3GM_fnc_medevacLeave;
             };
-            { unassignVehicle _x; moveOut _x } forEach units _squad;
-            sleep 4;
+            [_heli] call A3GM_fnc_heliUnload;
             ["backup", _id, "arrived", _target, mapGridPosition _lz] call A3GM_fnc_supportLog;
             [_heli, _lz] call A3GM_fnc_medevacLeave;
             ["backup", _id, _target, _squad] call A3GM_fnc_backupEscort;
@@ -779,23 +832,23 @@ A3GM_fnc_transport = {
             ["transport", _id, "failed", _target, ["could not land", "lost"] select (!alive _heli)] call A3GM_fnc_supportLog;
             [_heli, _lz] call A3GM_fnc_medevacLeave;
         };
-        private _end = time + 180;
-        waitUntil { sleep 2; !alive _heli || {vehicle _target == _heli} || {time > _end} };
+        // the caller first, then everyone close by who's coming (players and their AI squadmates)
+        private _aboard = [_heli, _target] call A3GM_fnc_heliBoard;
         if (!alive _heli || {vehicle _target != _heli}) exitWith {
             ["transport", _id, "failed", _target, ["nobody boarded", "lost"] select (!alive _heli)] call A3GM_fnc_supportLog;
             [_heli, _lz] call A3GM_fnc_medevacLeave;
         };
-        sleep 12;  // squadmates still running for the door
-        ["transport", _id, "wheelsup", _target, mapGridPosition _dest] call A3GM_fnc_supportLog;
+        ["transport", _id, "wheelsup", _target, format ["%1 %2", mapGridPosition _dest, _aboard]] call A3GM_fnc_supportLog;
         _heli land "NONE";
         private _destLz = [_dest, 200] call A3GM_fnc_medevacLZ;
         if !([_heli, _destLz, 900] call A3GM_fnc_medevacLand) exitWith {
             ["transport", _id, "failed", _target, ["could not land at the destination", "lost"] select (!alive _heli)] call A3GM_fnc_supportLog;
             [_heli, getPos _heli] call A3GM_fnc_medevacLeave;
         };
-        private _crew = units group driver _heli;
-        { if !(_x in _crew) then { [[_x], { unassignVehicle (_this select 0); moveOut (_this select 0) }] remoteExec ["spawn", _x] } } forEach crew _heli;
-        sleep 6;
+        // everybody out, and nobody left aboard, before it leaves
+        if !([_heli] call A3GM_fnc_heliUnload) then {
+            ["transport", _id, "diag", _target, "passengers still aboard at the destination"] call A3GM_fnc_supportLog;
+        };
         ["transport", _id, "arrived", _target, mapGridPosition _destLz] call A3GM_fnc_supportLog;
         [_heli, _destLz] call A3GM_fnc_medevacLeave;
     };
