@@ -259,7 +259,16 @@ A3GM_fnc_unmark = {
 //   auto:    revive if they're hurt, extract if they're fit
 // args: [id, player name, mode]. Progress for the Game Master's radio:
 //   A3GM|medevac|id|stage|player|detail   stage: launched, landing, landed, healed, aboard, wheelsup, hq, done, failed
-A3GM_medevacHelis = ["I_Heli_Transport_02_F", "I_Heli_light_03_unarmed_F", "B_Heli_Transport_01_F", "O_Heli_Light_02_unarmed_F"];
+A3GM_medevacHelis = ["I_Heli_Transport_02_F", "I_Heli_light_03_unarmed_F", "B_Heli_Transport_01_F", "B_Heli_Light_01_F",
+    "O_Heli_Light_02_unarmed_F", "O_Heli_Transport_04_covered_F"];
+
+// The available classes from a list, the given side's own first (I_ independent, B_ west, O_ east)
+A3GM_fnc_sideClasses = {
+    params ["_classes", "_side"];
+    private _prefix = ["I_", "B_", "O_"] select (([independent, west, east] find _side) max 0);
+    private _ok = _classes select { isClass (configFile >> "CfgVehicles" >> _x) };
+    (_ok select { (_x select [0, 2]) == _prefix }) + (_ok select { (_x select [0, 2]) != _prefix })
+};
 
 A3GM_fnc_medevacLog = {
     params ["_id", "_stage", "_unit", ["_detail", ""]];
@@ -325,7 +334,7 @@ A3GM_fnc_medevac = {
     private _idx = _players findIf { name _x == _name };
     if (_idx < 0) exitWith { [false, "no such player"] };
     private _target = _players select _idx;
-    private _class = A3GM_medevacHelis select { isClass (configFile >> "CfgVehicles" >> _x) } param [0, ""];
+    private _class = [A3GM_medevacHelis, side group _target] call A3GM_fnc_sideClasses param [0, ""];
     if (_class == "") exitWith { [false, "no medevac helicopter available"] };
     private _hq = markerPos "Synd_HQ";
     if (_hq isEqualTo [0, 0, 0]) then { _hq = _target getPos [3000, random 360] };
@@ -403,6 +412,274 @@ A3GM_fnc_medevac = {
         [_id, "done", _target, ""] call A3GM_fnc_medevacLog;
     };
     [true, format ["%1 %2 eta %3", _mode, mapGridPosition _target, _eta]]
+};
+
+// Support assets, all reporting progress as A3GM|<asset>|id|stage|player|detail for the Game Master's radio.
+A3GM_fnc_supportLog = {
+    params ["_asset", "_id", "_stage", "_unit", ["_detail", ""]];
+    diag_log text format ["A3GM|%1|%2|%3|%4|%5", _asset, _id, _stage,
+        (if (isNull _unit) then {""} else {name _unit}) call A3GM_fnc_clean, _detail call A3GM_fnc_clean];
+};
+
+A3GM_fnc_rebelHQ = {
+    params ["_near"];
+    private _hq = markerPos "Synd_HQ";
+    if (_hq isEqualTo [0, 0, 0]) then { _hq = _near getPos [3000, random 360] };
+    _hq
+};
+
+// A helicopter with an AI crew of the player's side, flying in from HQ (or 3 km out on the HQ side)
+A3GM_fnc_spawnHeli = {
+    params ["_target", "_side"];
+    private _class = [A3GM_medevacHelis, _side] call A3GM_fnc_sideClasses param [0, ""];
+    if (_class == "") exitWith { objNull };
+    private _hq = [_target] call A3GM_fnc_rebelHQ;
+    private _start = if (_target distance2D _hq < 6000) then { _hq } else { _target getPos [3000, _target getDir _hq] };
+    _start = [_start select 0, _start select 1, 150];
+    private _heli = createVehicle [_class, _start, [], 0, "FLY"];
+    _heli setPosATL _start;
+    _heli setDir (_start getDir _target);
+    _heli setVelocityModelSpace [0, 40, 0];
+    private _grp = createGroup [_side, true];
+    createVehicleCrew _heli;
+    (crew _heli) joinSilent _grp;
+    _grp setBehaviour "CARELESS";
+    _grp setCombatMode "BLUE";
+    _heli lockCargo false;
+    _heli
+};
+
+// A rebel squad from Antistasi's rebel templates (vanilla guerrillas if they're missing)
+A3GM_fnc_rebelSquad = {
+    params ["_side", "_pos", ["_n", 6]];
+    private _grp = createGroup [_side, true];
+    private _isReb = _side == (missionNamespace getVariable ["teamPlayer", independent]);
+    private _reb = if (_isReb) then { missionNamespace getVariable ["A3A_faction_reb", createHashMap] } else { createHashMap };
+    private _prefix = ["I_G_", "B_", "O_"] select (([independent, west, east] find _side) max 0);
+    private _types = ["unitSL", "unitMG", "unitRifle", "unitLAT", "unitMedic", "unitRifle", "unitGL", "unitRifle"]
+        apply { _reb getOrDefault [_x, ""] } select [0, _n];
+    {
+        private _u = objNull;
+        if (_x isNotEqualTo "" && {!isNil "A3A_fnc_createUnit"}) then {
+            _u = [_grp, _x, _pos, [], 5, "NONE"] call A3A_fnc_createUnit;
+        };
+        if (isNil "_u" || {isNull _u}) then {
+            _u = _grp createUnit [_prefix + (["Soldier_SL_F", "Soldier_AR_F", "Soldier_F", "Soldier_LAT_F", "medic_F",
+                "Soldier_F", "Soldier_GL_F", "Soldier_F"] select (_forEachIndex min 7)), _pos, [], 5, "NONE"];
+        };
+    } forEach _types;
+    _grp setBehaviour "AWARE";
+    _grp setCombatMode "RED";
+    _grp
+};
+
+// The squad sticks with the player for 15 minutes, then is removed once no player is near
+A3GM_fnc_backupEscort = {
+    params ["_asset", "_id", "_target", "_grp", ["_vehicle", objNull]];
+    private _end = time + 900;
+    while { time < _end && {({ alive _x } count units _grp) > 0} } do {
+        if (alive _target) then { _grp move (_target getPos [15, random 360]) };
+        sleep 20;
+    };
+    [_asset, _id, ["done", "lost"] select (({ alive _x } count units _grp) == 0), _target, ""] call A3GM_fnc_supportLog;
+    waitUntil { sleep 10; ((call A3GM_fnc_players) findIf { _x distance2D (leader _grp) < 1200 }) < 0 || {({ alive _x } count units _grp) == 0} };
+    { deleteVehicle _x } forEach units _grp;
+    if (!isNull _vehicle && {(crew _vehicle) findIf { isPlayer _x } < 0}) then { deleteVehicle _vehicle };
+    deleteGroup _grp;
+};
+
+// BACKUP: a rebel squad, by helicopter or by road (random). args: [id, player name]
+A3GM_fnc_backup = {
+    params [["_id", "", [""]], ["_name", "", [""]]];
+    private _players = call A3GM_fnc_players;
+    private _idx = _players findIf { name _x == _name };
+    if (_idx < 0) exitWith { [false, "no such player"] };
+    private _target = _players select _idx;
+    private _side = side group _target;
+    private _hq = [_target] call A3GM_fnc_rebelHQ;
+    private _reb = missionNamespace getVariable ["A3A_faction_reb", createHashMap];
+    // the rebels' own vehicles when the caller is a rebel, else that side's light vehicles
+    private _cars = if (_side == (missionNamespace getVariable ["teamPlayer", independent])) then {
+        ((_reb getOrDefault ["vehiclesLightArmed", []]) + (_reb getOrDefault ["vehiclesLightUnarmed", []])
+            + ["I_G_Offroad_01_armed_F", "I_G_Offroad_01_F"]) select { _x isEqualType "" && {isClass (configFile >> "CfgVehicles" >> _x)} }
+    } else {
+        [["B_G_Offroad_01_armed_F", "B_MRAP_01_hmg_F", "O_G_Offroad_01_armed_F", "O_MRAP_02_hmg_F", "I_MRAP_03_hmg_F"], _side]
+            call A3GM_fnc_sideClasses
+    };
+    private _road = [_target getPos [1500, _target getDir _hq], 400] call BIS_fnc_nearestRoad;
+    private _byAir = (random 1 < 0.5 || {_cars isEqualTo []} || {isNull _road}) && {([A3GM_medevacHelis, _side] call A3GM_fnc_sideClasses) isNotEqualTo []};
+    if (!_byAir && {_cars isEqualTo [] || {isNull _road}}) exitWith { [false, "no transport for backup"] };
+
+    if (_byAir) exitWith {
+        private _heli = [_target, _side] call A3GM_fnc_spawnHeli;
+        private _squad = [_side, getPos _heli, 6] call A3GM_fnc_rebelSquad;
+        { _x moveInCargo _heli } forEach units _squad;
+        private _eta = round ((_heli distance2D _target) / 55 + 40);
+        ["backup", _id, "launched", _target, format ["helicopter %1 eta %2", count units _squad, _eta]] call A3GM_fnc_supportLog;
+        [_id, _target, _heli, _squad] spawn {
+            params ["_id", "_target", "_heli", "_squad"];
+            private _lz = [_target getPos [120, random 360], 150] call A3GM_fnc_medevacLZ;
+            createVehicle ["SmokeShellGreen", _lz, [], 0, "CAN_COLLIDE"];
+            if !([_heli, _lz] call A3GM_fnc_medevacLand) exitWith {
+                ["backup", _id, "lost", _target, "helicopter"] call A3GM_fnc_supportLog;
+                [_heli, _lz] call A3GM_fnc_medevacLeave;
+            };
+            { unassignVehicle _x; moveOut _x } forEach units _squad;
+            sleep 4;
+            ["backup", _id, "arrived", _target, mapGridPosition _lz] call A3GM_fnc_supportLog;
+            [_heli, _lz] call A3GM_fnc_medevacLeave;
+            ["backup", _id, _target, _squad] call A3GM_fnc_backupEscort;
+        };
+        [true, format ["helicopter %1 %2", 6, mapGridPosition _target]]
+    };
+
+    private _class = selectRandom _cars;
+    private _spawn = getPos _road;
+    private _car = createVehicle [_class, _spawn, [], 0, "NONE"];
+    _car setDir (_spawn getDir _target);
+    private _squad = [_side, _spawn getPos [8, 0], [5, 6] select ((_car emptyPositions "cargo") >= 5)] call A3GM_fnc_rebelSquad;
+    private _units = units _squad;
+    (_units select 0) moveInDriver _car;
+    if (_car emptyPositions "gunner" > 0 && {count _units > 1}) then { (_units select 1) moveInGunner _car };
+    { if (vehicle _x == _x) then { _x moveInCargo _car } } forEach _units;
+    { if (vehicle _x == _x) then { deleteVehicle _x } } forEach _units;  // no seat: don't leave them walking
+    _squad setBehaviour "SAFE";
+    _squad move (getPos _target);
+    private _eta = round ((_car distance2D _target) / 12 + 20);
+    ["backup", _id, "launched", _target, format ["%1 %2 eta %3", getText (configFile >> "CfgVehicles" >> _class >> "displayName"),
+        count units _squad, _eta]] call A3GM_fnc_supportLog;
+    [_id, _target, _car, _squad] spawn {
+        params ["_id", "_target", "_car", "_squad"];
+        private _end = time + 300;
+        waitUntil { sleep 3; !alive _car || {time > _end} || {_car distance2D _target < 150} || {({ alive _x } count units _squad) == 0} };
+        if (({ alive _x } count units _squad) == 0) exitWith { ["backup", _id, "lost", _target, "vehicle"] call A3GM_fnc_supportLog };
+        // the crew-served weapon stays manned; everyone else gets out and fights
+        { if (_x != gunner _car && {_x != driver _car}) then { unassignVehicle _x; moveOut _x } } forEach units _squad;
+        _squad setBehaviour "AWARE";
+        ["backup", _id, "arrived", _target, mapGridPosition _car] call A3GM_fnc_supportLog;
+        ["backup", _id, _target, _squad, _car] call A3GM_fnc_backupEscort;
+    };
+    [true, format ["vehicle %1 %2", count units _squad, mapGridPosition _target]]
+};
+
+// UAV: an unarmed Greyhawk loitering over the player for 15 minutes; the player gets a UAV terminal if they
+// have none; enemy groups it knows about are reported for the battle net every 15 s:
+//   A3GM|uavspot|id|x|y|count|kind      kind: INF VEH APC ARMOR AIR BOAT
+// args: [id, player name]
+A3GM_fnc_uav = {
+    params [["_id", "", [""]], ["_name", "", [""]]];
+    private _players = call A3GM_fnc_players;
+    private _idx = _players findIf { name _x == _name };
+    if (_idx < 0) exitWith { [false, "no such player"] };
+    private _target = _players select _idx;
+    private _side = side group _target;
+    private _class = [["I_UAV_02_dynamicLoadout_F", "B_UAV_02_dynamicLoadout_F", "O_UAV_02_dynamicLoadout_F",
+        "I_UAV_01_F", "B_UAV_01_F", "O_UAV_01_F"], _side] call A3GM_fnc_sideClasses param [0, ""];
+    if (_class == "") exitWith { [false, "no UAV available"] };
+    private _hq = [_target] call A3GM_fnc_rebelHQ;
+    private _start = _target getPos [2000, _target getDir _hq];
+    _start = [_start select 0, _start select 1, 450];
+    private _uav = createVehicle [_class, _start, [], 0, "FLY"];
+    _uav setPosATL _start;
+    _uav setVelocityModelSpace [0, 50, 0];
+    createVehicleCrew _uav;
+    private _grp = createGroup [_side, true];
+    (crew _uav) joinSilent _grp;
+    { _uav setPylonLoadout [_forEachIndex + 1, ""] } forEach (getPylonMagazines _uav);  // recon only
+    _grp setBehaviour "CARELESS";
+    _grp setCombatMode "BLUE";
+    _uav flyInHeight 450;
+    private _wp = _grp addWaypoint [getPos _target, 0];
+    _wp setWaypointType "LOITER";
+    _wp setWaypointLoiterType "CIRCLE_L";
+    _wp setWaypointLoiterRadius 600;
+    private _terminal = ["I_UavTerminal", "B_UavTerminal", "O_UavTerminal"] select (([independent, west, east] find _side) max 0);
+    [[_target, _terminal], {
+        params ["_u", "_t"];
+        if ((assignedItems _u) findIf { "uavterminal" in toLower _x } < 0) then { _u linkItem _t };
+    }] remoteExec ["spawn", _target];
+    ["uav", _id, "launched", _target, format ["%1 eta %2", getText (configFile >> "CfgVehicles" >> _class >> "displayName"),
+        round ((_uav distance2D _target) / 60)]] call A3GM_fnc_supportLog;
+
+    [_id, _target, _uav, _grp] spawn {
+        params ["_id", "_target", "_uav", "_grp"];
+        private _center = getPos _target;
+        waitUntil { sleep 3; !alive _uav || {_uav distance2D _center < 900} };
+        if (alive _uav) then { ["uav", _id, "onstation", _target, mapGridPosition _center] call A3GM_fnc_supportLog };
+        private _hostile = call A3GM_fnc_hostileSides;
+        private _end = time + 900;
+        while { alive _uav && {time < _end} } do {
+            private _seen = allGroups select {
+                side _x in _hostile && {(units _x) findIf { alive _x } >= 0}
+                && {(leader _x) distance2D _uav < 2000} && {(effectiveCommander _uav) knowsAbout (leader _x) > 1}
+            };
+            {
+                private _l = leader _x;
+                private _v = vehicle _l;
+                private _kind = switch (true) do {
+                    case (_v isKindOf "Air"): { "AIR" };
+                    case (_v isKindOf "Ship"): { "BOAT" };
+                    case (_v isKindOf "Tank"): { "ARMOR" };
+                    case (_v isKindOf "Wheeled_APC_F" || {_v isKindOf "Tracked_APC"}): { "APC" };
+                    case (_v isKindOf "Car"): { "VEH" };
+                    default { "INF" };
+                };
+                diag_log text format ["A3GM|uavspot|%1|%2|%3|%4|%5", _id, round ((getPos _l) select 0), round ((getPos _l) select 1),
+                    { alive _x } count units _x, _kind];
+            } forEach (_seen select [0, 12]);
+            sleep 15;
+        };
+        ["uav", _id, ["rtb", "lost"] select (!alive _uav), _target, ""] call A3GM_fnc_supportLog;
+        if (alive _uav) then { [_uav, getPos _uav] call A3GM_fnc_medevacLeave };
+    };
+    [true, format ["%1 over %2", _class, mapGridPosition _target]]
+};
+
+// TRANSPORT: a helicopter picks the player (and whoever boards with them) up and flies them to a grid, lands,
+// unloads and leaves. args: [id, player name, grid]
+A3GM_fnc_transport = {
+    params [["_id", "", [""]], ["_name", "", [""]], ["_grid", "", [""]]];
+    private _players = call A3GM_fnc_players;
+    private _idx = _players findIf { name _x == _name };
+    if (_idx < 0) exitWith { [false, "no such player"] };
+    private _target = _players select _idx;
+    private _dest = _grid call A3GM_fnc_gridPos;
+    if (_dest isEqualType "") exitWith { [false, _dest] };
+    if (_target distance2D _dest < 500) exitWith { [false, "you're already there"] };
+    private _heli = [_target, side group _target] call A3GM_fnc_spawnHeli;
+    if (isNull _heli) exitWith { [false, "no helicopter available"] };
+    private _eta = round ((_heli distance2D _target) / 55 + 40);
+    ["transport", _id, "launched", _target, format ["%1 eta %2", mapGridPosition _dest, _eta]] call A3GM_fnc_supportLog;
+    [_id, _target, _heli, _dest] spawn {
+        params ["_id", "_target", "_heli", "_dest"];
+        private _lz = [getPos _target, 150] call A3GM_fnc_medevacLZ;
+        createVehicle ["SmokeShellGreen", _lz, [], 0, "CAN_COLLIDE"];
+        ["transport", _id, "landing", _target, mapGridPosition _lz] call A3GM_fnc_supportLog;
+        if !([_heli, _lz] call A3GM_fnc_medevacLand) exitWith {
+            ["transport", _id, "failed", _target, ["could not land", "lost"] select (!alive _heli)] call A3GM_fnc_supportLog;
+            [_heli, _lz] call A3GM_fnc_medevacLeave;
+        };
+        private _end = time + 180;
+        waitUntil { sleep 2; !alive _heli || {vehicle _target == _heli} || {time > _end} };
+        if (!alive _heli || {vehicle _target != _heli}) exitWith {
+            ["transport", _id, "failed", _target, ["nobody boarded", "lost"] select (!alive _heli)] call A3GM_fnc_supportLog;
+            [_heli, _lz] call A3GM_fnc_medevacLeave;
+        };
+        sleep 12;  // squadmates still running for the door
+        ["transport", _id, "wheelsup", _target, mapGridPosition _dest] call A3GM_fnc_supportLog;
+        _heli land "NONE";
+        private _destLz = [_dest, 200] call A3GM_fnc_medevacLZ;
+        if !([_heli, _destLz, 900] call A3GM_fnc_medevacLand) exitWith {
+            ["transport", _id, "failed", _target, ["could not land at the destination", "lost"] select (!alive _heli)] call A3GM_fnc_supportLog;
+            [_heli, getPos _heli] call A3GM_fnc_medevacLeave;
+        };
+        private _crew = units group driver _heli;
+        { if !(_x in _crew) then { [[_x], { unassignVehicle (_this select 0); moveOut (_this select 0) }] remoteExec ["spawn", _x] } } forEach crew _heli;
+        sleep 6;
+        ["transport", _id, "arrived", _target, mapGridPosition _destLz] call A3GM_fnc_supportLog;
+        [_heli, _destLz] call A3GM_fnc_medevacLeave;
+    };
+    [true, format ["%1 eta %2", mapGridPosition _dest, _eta]]
 };
 
 // args: [overcast 0-1, rain 0-1, fog 0-0.5]
@@ -699,7 +976,10 @@ A3GM_actions = createHashMapFromArray [
     ["AIRSTRIKE", A3GM_fnc_airstrike],
     ["MARK", A3GM_fnc_mark],
     ["UNMARK", A3GM_fnc_unmark],
-    ["MEDEVAC", A3GM_fnc_medevac]
+    ["MEDEVAC", A3GM_fnc_medevac],
+    ["BACKUP", A3GM_fnc_backup],
+    ["UAV", A3GM_fnc_uav],
+    ["TRANSPORT", A3GM_fnc_transport]
 ];
 
 // Chat relay. Each player's client sends the chat its own player types here; the sender comes
