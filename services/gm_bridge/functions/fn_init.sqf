@@ -1174,6 +1174,13 @@ A3GM_fnc_betterRadios = {
         _unlocked joinString ", ", missionNamespace getVariable ["TFAR_disableAutoMute", "?"]];
 };
 
+// The map's grid convention, for the Game Master's targeting: mapGridPosition at known positions
+A3GM_fnc_gridInfo = {
+    private _probe = [[50, 50], [1050, 50], [50, 1050], [worldSize - 50, worldSize - 50]];
+    [true, format ["%1 size %2 %3", worldName, worldSize,
+        (_probe apply { format ["%1,%2=%3", _x select 0, _x select 1, mapGridPosition _x] }) joinString " "]]
+};
+
 A3GM_actions = createHashMapFromArray [
     ["SAY", A3GM_fnc_say],
     ["AIRDROP", A3GM_fnc_airdrop],
@@ -1191,7 +1198,8 @@ A3GM_actions = createHashMapFromArray [
     ["BACKUP", A3GM_fnc_backup],
     ["UAV", A3GM_fnc_uav],
     ["TRANSPORT", A3GM_fnc_transport],
-    ["CANCEL", A3GM_fnc_cancel]
+    ["CANCEL", A3GM_fnc_cancel],
+    ["GRIDINFO", A3GM_fnc_gridInfo]
 ];
 
 // Chat relay. Each player's client sends the chat its own player types here; the sender comes
