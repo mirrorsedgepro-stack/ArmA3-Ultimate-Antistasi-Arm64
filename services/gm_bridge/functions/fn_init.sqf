@@ -290,6 +290,20 @@ A3GM_fnc_supportTarget = {
     _u
 };
 
+// Support assets by id, so a caller can cancel ("Overlord, cancel the pickup")
+A3GM_supportAssets = createHashMap;
+A3GM_fnc_cancelled = { params ["_id"]; (A3GM_supportAssets getOrDefault [_id, [false]]) select 0 };
+// args: [id]
+A3GM_fnc_cancel = {
+    params [["_id", "", [""]]];
+    private _entry = A3GM_supportAssets getOrDefault [_id, []];
+    if (_entry isEqualTo []) exitWith { [false, "nothing to cancel"] };
+    _entry set [0, true];
+    { _x setVariable ["A3GM_cancel", true] } forEach (_entry select 1);
+    { if (alive _x && {_x isKindOf "Air"}) then { [_x, getPos _x] spawn A3GM_fnc_medevacLeave } } forEach (_entry select 1);
+    [true, format ["cancelled %1", _id]]
+};
+
 A3GM_fnc_medevacLog = {
     params ["_id", "_stage", "_unit", ["_detail", ""]];
     diag_log text format ["A3GM|medevac|%1|%2|%3|%4", _id, _stage, (if (isNull _unit) then {""} else {name _unit}) call A3GM_fnc_clean,
@@ -318,6 +332,8 @@ A3GM_fnc_medevacLand = {
     params ["_heli", "_lz", ["_timeout", 300]];
     private _pad = createVehicle ["Land_HelipadEmpty_F", _lz, [], 0, "CAN_COLLIDE"];
     private _grp = group driver _heli;
+    driver _heli enableAI "MOVE";  // parked at the last stop
+    _heli setVariable ["A3GM_parked", false];
     _grp move _lz;
     _heli flyInHeight 70;
     private _end = time + _timeout;
@@ -332,20 +348,36 @@ A3GM_fnc_medevacLand = {
             sleep 15;
         };
     };
-    waitUntil { sleep 1; !alive _heli || {!alive driver _heli} || {time > _end} || {_heli distance2D _lz < 250} };
+    waitUntil { sleep 1; !alive _heli || {!alive driver _heli} || {time > _end} || {_heli distance2D _lz < 250}
+        || {_heli getVariable ["A3GM_cancel", false]} };
     if (alive _heli && {alive driver _heli} && {time <= _end}) then {
         // A land order given while the move is still finishing gets dropped (the heli then hovers at its flight
-        // height): keep giving it until it's down
-        _heli land "GET IN";
+        // height): repeat it while it's still up there. Close and low, leave it alone: a fresh move order makes it
+        // climb out and come round again (the up-and-down players saw on slopes).
+        _heli land "LAND";
         waitUntil {
             sleep 2;
-            if (!isTouchingGround _heli && {unitReady driver _heli}) then { driver _heli doMove _lz; _heli land "GET IN" };
-            !alive _heli || {!alive driver _heli} || {time > _end} || {isTouchingGround _heli && {speed _heli < 3}}
+            private _alt = (getPosATL _heli) select 2;
+            if (_alt > 8 && {unitReady driver _heli}) then {
+                if (_heli distance2D _lz > 60) then { driver _heli doMove _lz };
+                _heli land "LAND";
+            };
+            !alive _heli || {!alive driver _heli} || {time > _end}
+                || {(isTouchingGround _heli || {((getPosATL _heli) select 2) < 1.5}) && {speed _heli < 3}}
         };
     };
     deleteVehicle _pad;
     terminate _diag;
-    alive _heli && {alive driver _heli} && {isTouchingGround _heli}
+    private _down = alive _heli && {alive driver _heli} && {isTouchingGround _heli || {((getPosATL _heli) select 2) < 1.5}};
+    if (_down) then {
+        // Parked: the pilot can't lift off (a "GET IN" landing climbs out again when someone outside the crew
+        // walks up), and anyone may board
+        driver _heli disableAI "MOVE";
+        _heli lock 0;
+        _heli lockCargo false;
+        _heli setVariable ["A3GM_parked", true];
+    };
+    _down
 };
 
 // Passengers: everyone aboard who isn't the helicopter's own crew
@@ -366,7 +398,7 @@ A3GM_fnc_heliBoard = {
         if (_target getVariable ["A3GM_standin", false] && {vehicle _target != _heli} && {_target distance2D _heli < 300}) then {
             _target moveInCargo _heli;
         };
-        !alive _heli || {vehicle _target == _heli} || {time > _end}
+        !alive _heli || {vehicle _target == _heli} || {time > _end} || {_heli getVariable ["A3GM_cancel", false]}
     };
     if (!alive _heli || {vehicle _target != _heli}) exitWith { 0 };
     private _end2 = time + _extra;
@@ -403,6 +435,8 @@ A3GM_fnc_medevacLeave = {
     if (isTouchingGround _heli && {([_heli] call A3GM_fnc_heliPassengers) isNotEqualTo []}) then {
         [_heli, 120] call A3GM_fnc_heliUnload;  // last check before lifting off with someone aboard
     };
+    driver _heli enableAI "MOVE";
+    _heli setVariable ["A3GM_parked", false];
     private _grp = group driver _heli;
     _heli land "NONE";
     _grp move (_from getPos [4000, (_heli getDir _from) + 180]);
@@ -445,6 +479,7 @@ A3GM_fnc_medevac = {
     _grp setCombatMode "BLUE";  // a medevac doesn't pick fights
     _heli lockCargo false;
     private _eta = round ((_start distance2D _target) / 55 + 40);
+    A3GM_supportAssets set [_id, [false, [_heli]]];
     [_id, "launched", _target, format ["%1 %2 eta %3", _class, _mode, _eta]] call A3GM_fnc_medevacLog;
 
     [_id, _target, _heli, _mode, _hq] spawn {
@@ -823,6 +858,7 @@ A3GM_fnc_transport = {
     if (_target distance2D _dest < 500) exitWith { [false, "you're already there"] };
     private _heli = [_target, side group _target] call A3GM_fnc_spawnHeli;
     if (isNull _heli) exitWith { [false, "no helicopter available"] };
+    A3GM_supportAssets set [_id, [false, [_heli]]];
     private _eta = round ((_heli distance2D _target) / 55 + 40);
     ["transport", _id, "launched", _target, format ["%1 eta %2", mapGridPosition _dest, _eta]] call A3GM_fnc_supportLog;
     [_id, _target, _heli, _dest] spawn {
@@ -1154,7 +1190,8 @@ A3GM_actions = createHashMapFromArray [
     ["MEDEVAC", A3GM_fnc_medevac],
     ["BACKUP", A3GM_fnc_backup],
     ["UAV", A3GM_fnc_uav],
-    ["TRANSPORT", A3GM_fnc_transport]
+    ["TRANSPORT", A3GM_fnc_transport],
+    ["CANCEL", A3GM_fnc_cancel]
 ];
 
 // Chat relay. Each player's client sends the chat its own player types here; the sender comes
