@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 ./scripts/restart_when_empty.sh || exit 1
 GM=/home/jcee-slave/openclaw-gm
 start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-for c in 'TRANSPORT|ft1|@11781837|12781967' 'MEDEVAC|fm1|@12281573|extract' 'BACKUP|fb1|@12281573'; do
+for c in 'TRANSPORT|ft1|@11781837|12781967' 'MEDEVAC|fm1|@12281573|extract' 'BACKUP|fb1|@12281573|air'; do
     (cd "$GM" && PYTHONPATH=. timeout 60 ./venv/bin/python main.py --arma-cmd "$c" 2>&1 | grep -oE '\-> (ok|fail): .*$' | tail -1 | sed "s/^/$(date -u +%T) ${c%%|*}: /")
 done
 for _ in $(seq 1 60); do  # up to 15 minutes for all three to finish

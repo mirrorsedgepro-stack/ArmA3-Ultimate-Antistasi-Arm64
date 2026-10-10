@@ -474,7 +474,8 @@ A3GM_fnc_medevac = {
         private _end = time + 180;
         waitUntil {
             sleep 2;
-            if (alive _target && {vehicle _target != _heli} && {_target distance2D _heli < 80}
+            // the crew carries a casualty who can't walk from anywhere the LZ could be (up to 150 m away)
+            if (alive _target && {vehicle _target != _heli} && {_target distance2D _heli < 200}
                 && {(_target call A3GM_fnc_condition) in ["unconscious", "bleeding"] || {_target getVariable ["A3GM_standin", false]}}) then {
                 [[_target, _heli], { params ["_u", "_h"]; _u moveInCargo _h }] remoteExec ["spawn", _target];
             };
@@ -579,9 +580,9 @@ A3GM_fnc_backupEscort = {
     deleteGroup _grp;
 };
 
-// BACKUP: a rebel squad, by helicopter or by road (random). args: [id, player name]
+// BACKUP: a rebel squad, by helicopter or by road (random; "air" / "road" to choose). args: [id, player name, how]
 A3GM_fnc_backup = {
-    params [["_id", "", [""]], ["_name", "", [""]]];
+    params [["_id", "", [""]], ["_name", "", [""]], ["_how", "", [""]]];
     private _target = [_name] call A3GM_fnc_supportTarget;
     if (isNull _target) exitWith { [false, "no such player"] };
     private _side = side group _target;
@@ -606,7 +607,8 @@ A3GM_fnc_backup = {
         } forEach [1500, 1200];
     } forEach [0, 45, -45, 90, -90, 180];
     private _road = _roads param [0, objNull];
-    private _byAir = (random 1 < 0.5 || {_cars isEqualTo []} || {isNull _road}) && {([A3GM_medevacHelis, _side] call A3GM_fnc_sideClasses) isNotEqualTo []};
+    private _byAir = ((random 1 < 0.5 && {_how != "road"}) || {_how == "air"} || {_cars isEqualTo []} || {isNull _road})
+        && {([A3GM_medevacHelis, _side] call A3GM_fnc_sideClasses) isNotEqualTo []};
     if (!_byAir && {_cars isEqualTo [] || {isNull _road}}) exitWith { [false, "no transport for backup"] };
 
     if (_byAir) exitWith {
