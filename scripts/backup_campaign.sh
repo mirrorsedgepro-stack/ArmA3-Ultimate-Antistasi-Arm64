@@ -37,7 +37,8 @@ if ! docker run --rm --entrypoint tar -v "${ROOT_DIR}/configs:/configs:ro" "$IMA
     exit 1
 fi
 mv "${BACKUP_FILE}.tmp" "$BACKUP_FILE"
-if ! tar -tzf "$BACKUP_FILE" | grep -q '\.vars\.Arma3Profile$'; then
+# (count, don't grep -q: an early exit makes tar fail on SIGPIPE, which pipefail reports as "no save")
+if [ "$(tar -tzf "$BACKUP_FILE" | grep -c '\.vars\.Arma3Profile$')" -eq 0 ]; then
     echo "Warning: the archive holds no campaign save (*.vars.Arma3Profile) yet." >&2
 fi
 
