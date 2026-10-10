@@ -253,6 +253,158 @@ A3GM_fnc_unmark = {
     };
 };
 
+// MEDEVAC: a friendly helicopter ("dustoff") flies from the rebel HQ to a casualty.
+//   revive:  lands near them, the crew medic treats every wounded player within 60 m, then it leaves
+//   extract: lands, loads the casualty (unconscious ones are carried aboard), flies them to HQ, unloads, heals
+//   auto:    revive if they're hurt, extract if they're fit
+// args: [id, player name, mode]. Progress for the Game Master's radio:
+//   A3GM|medevac|id|stage|player|detail   stage: launched, landing, landed, healed, aboard, wheelsup, hq, done, failed
+A3GM_medevacHelis = ["I_Heli_Transport_02_F", "I_Heli_light_03_unarmed_F", "B_Heli_Transport_01_F", "O_Heli_Light_02_unarmed_F"];
+
+A3GM_fnc_medevacLog = {
+    params ["_id", "_stage", "_unit", ["_detail", ""]];
+    diag_log text format ["A3GM|medevac|%1|%2|%3|%4", _id, _stage, (if (isNull _unit) then {""} else {name _unit}) call A3GM_fnc_clean,
+        _detail call A3GM_fnc_clean];
+};
+
+// Full heal where the unit is local (ACE when present), waking it if unconscious
+A3GM_fnc_medevacHeal = {
+    params ["_u"];
+    [[_u], {
+        params ["_u"];
+        if (!isNil "ace_medical_treatment_fnc_fullHealLocal") then { [_u] call ace_medical_treatment_fnc_fullHealLocal }
+        else { _u setDamage 0; if (lifeState _u == "INCAPACITATED") then { _u setUnconscious false } };
+    }] remoteExec ["spawn", _u];
+};
+
+A3GM_fnc_medevacLZ = {
+    params ["_center", ["_radius", 150]];
+    private _lz = [_center, 0, _radius, 12, 0, 0.35, 0, [], [_center, _center]] call BIS_fnc_findSafePos;
+    if (count _lz < 2 || {_lz distance2D _center > _radius + 50}) then { _lz = _center };
+    [_lz select 0, _lz select 1, 0]
+};
+
+A3GM_fnc_medevacLand = {
+    // Fly to _lz and land; true once on the ground (or false: shot down, crew dead, timed out)
+    params ["_heli", "_lz", ["_timeout", 300]];
+    private _pad = createVehicle ["Land_HelipadEmpty_F", _lz, [], 0, "CAN_COLLIDE"];
+    private _grp = group driver _heli;
+    _grp move _lz;
+    _heli flyInHeight 70;
+    private _end = time + _timeout;
+    waitUntil { sleep 1; !alive _heli || {!alive driver _heli} || {time > _end} || {_heli distance2D _lz < 250} };
+    if (alive _heli && {alive driver _heli} && {time <= _end}) then {
+        _heli land "GET IN";
+        waitUntil { sleep 1; !alive _heli || {!alive driver _heli} || {time > _end} || {isTouchingGround _heli && {speed _heli < 3}} };
+    };
+    deleteVehicle _pad;
+    alive _heli && {alive driver _heli} && {isTouchingGround _heli}
+};
+
+A3GM_fnc_medevacLeave = {
+    params ["_heli", "_from"];
+    if (!alive _heli) exitWith {};
+    private _grp = group driver _heli;
+    _heli land "NONE";
+    _grp move (_from getPos [4000, (_heli getDir _from) + 180]);
+    _heli flyInHeight 150;
+    [_heli, _grp] spawn {
+        params ["_heli", "_grp"];
+        private _end = time + 240;
+        waitUntil { sleep 5; !alive _heli || {time > _end} || {((call A3GM_fnc_players) findIf { _x distance2D _heli < 2500 }) < 0} };
+        if (alive _heli && {(crew _heli) findIf { isPlayer _x } >= 0}) exitWith {};  // a player hitched a ride: leave it
+        { deleteVehicle _x } forEach crew _heli;
+        deleteVehicle _heli;
+        deleteGroup _grp;
+    };
+};
+
+A3GM_fnc_medevac = {
+    params [["_id", "", [""]], ["_name", "", [""]], ["_mode", "auto", [""]]];
+    private _players = call A3GM_fnc_players;
+    private _idx = _players findIf { name _x == _name };
+    if (_idx < 0) exitWith { [false, "no such player"] };
+    private _target = _players select _idx;
+    private _class = A3GM_medevacHelis select { isClass (configFile >> "CfgVehicles" >> _x) } param [0, ""];
+    if (_class == "") exitWith { [false, "no medevac helicopter available"] };
+    private _hq = markerPos "Synd_HQ";
+    if (_hq isEqualTo [0, 0, 0]) then { _hq = _target getPos [3000, random 360] };
+    _mode = toLower _mode;
+    if (_mode == "auto") then { _mode = ["extract", "revive"] select ((_target call A3GM_fnc_condition) != "fit") };
+    if (_mode == "extract" && {_target distance2D _hq < 400}) exitWith { [false, "you're already at HQ"] };
+
+    // Launch from HQ if it's within 6 km, else 3 km out on the HQ side
+    private _start = if (_target distance2D _hq < 6000) then { _hq } else { _target getPos [3000, _target getDir _hq] };
+    _start = [_start select 0, _start select 1, 150];
+    private _side = side group _target;
+    private _heli = createVehicle [_class, _start, [], 0, "FLY"];
+    _heli setPosATL _start;
+    _heli setDir (_start getDir _target);
+    _heli setVelocityModelSpace [0, 40, 0];
+    private _grp = createGroup [_side, true];
+    createVehicleCrew _heli;
+    (crew _heli) joinSilent _grp;
+    _grp setBehaviour "CARELESS";
+    _grp setCombatMode "BLUE";  // a medevac doesn't pick fights
+    _heli lockCargo false;
+    private _eta = round ((_start distance2D _target) / 55 + 40);
+    [_id, "launched", _target, format ["%1 %2 eta %3", _class, _mode, _eta]] call A3GM_fnc_medevacLog;
+
+    [_id, _target, _heli, _mode, _hq] spawn {
+        params ["_id", "_target", "_heli", "_mode", "_hq"];
+        private _lz = [getPos _target] call A3GM_fnc_medevacLZ;
+        private _smoke = createVehicle ["SmokeShellGreen", _lz, [], 0, "CAN_COLLIDE"];
+        [_id, "landing", _target, mapGridPosition _lz] call A3GM_fnc_medevacLog;
+        if !([_heli, _lz] call A3GM_fnc_medevacLand) exitWith {
+            [_id, "failed", _target, ["could not land", "lost"] select (!alive _heli)] call A3GM_fnc_medevacLog;
+            [_heli, _lz] call A3GM_fnc_medevacLeave;
+        };
+        [_id, "landed", _target, mapGridPosition _heli] call A3GM_fnc_medevacLog;
+
+        if (_mode == "revive") exitWith {
+            sleep 8;  // the medic gets out to them
+            private _treated = (call A3GM_fnc_players) select { _x distance2D _heli < 60 && {(_x call A3GM_fnc_condition) != "fit"} };
+            if (_target distance2D _heli < 120) then { _treated pushBackUnique _target };
+            { [_x] call A3GM_fnc_medevacHeal } forEach _treated;
+            [_id, "healed", _target, (_treated apply { name _x }) joinString ", "] call A3GM_fnc_medevacLog;
+            sleep 5;
+            [_id, "wheelsup", _target, "rtb"] call A3GM_fnc_medevacLog;
+            [_heli, _lz] call A3GM_fnc_medevacLeave;
+            [_id, "done", _target, ""] call A3GM_fnc_medevacLog;
+        };
+
+        // extract: board them (carry them aboard if they can't walk), up to 3 minutes
+        private _end = time + 180;
+        waitUntil {
+            sleep 2;
+            if (alive _target && {vehicle _target != _heli} && {_target distance2D _heli < 80}
+                && {(_target call A3GM_fnc_condition) in ["unconscious", "bleeding"]}) then {
+                [[_target, _heli], { params ["_u", "_h"]; _u moveInCargo _h }] remoteExec ["spawn", _target];
+            };
+            !alive _heli || {!alive _target} || {vehicle _target == _heli} || {time > _end}
+        };
+        if (!alive _heli || {vehicle _target != _heli}) exitWith {
+            [_id, "failed", _target, ["casualty didn't board", "lost"] select (!alive _heli)] call A3GM_fnc_medevacLog;
+            [_heli, _lz] call A3GM_fnc_medevacLeave;
+        };
+        [_id, "aboard", _target, ""] call A3GM_fnc_medevacLog;
+        [_target] call A3GM_fnc_medevacHeal;  // the crew medic works on them in flight
+        sleep 3;
+        [_id, "wheelsup", _target, "hq"] call A3GM_fnc_medevacLog;
+        private _hqLz = [_hq, 200] call A3GM_fnc_medevacLZ;
+        if !([_heli, _hqLz, 600] call A3GM_fnc_medevacLand) exitWith {
+            [_id, "failed", _target, ["could not land at HQ", "lost"] select (!alive _heli)] call A3GM_fnc_medevacLog;
+            [_heli, _lz] call A3GM_fnc_medevacLeave;
+        };
+        { if (isPlayer _x) then { [[_x], { moveOut (_this select 0) }] remoteExec ["spawn", _x] } } forEach crew _heli;
+        sleep 4;
+        [_id, "hq", _target, mapGridPosition _heli] call A3GM_fnc_medevacLog;
+        [_heli, _hqLz] call A3GM_fnc_medevacLeave;
+        [_id, "done", _target, ""] call A3GM_fnc_medevacLog;
+    };
+    [true, format ["%1 %2 eta %3", _mode, mapGridPosition _target, _eta]]
+};
+
 // args: [overcast 0-1, rain 0-1, fog 0-0.5]
 A3GM_fnc_weather = {
     params [["_overcast", 0.5, [0]], ["_rain", 0, [0]], ["_fog", 0, [0]]];
@@ -546,7 +698,8 @@ A3GM_actions = createHashMapFromArray [
     ["SITREP", A3GM_fnc_sitrep],
     ["AIRSTRIKE", A3GM_fnc_airstrike],
     ["MARK", A3GM_fnc_mark],
-    ["UNMARK", A3GM_fnc_unmark]
+    ["UNMARK", A3GM_fnc_unmark],
+    ["MEDEVAC", A3GM_fnc_medevac]
 ];
 
 // Chat relay. Each player's client sends the chat its own player types here; the sender comes
