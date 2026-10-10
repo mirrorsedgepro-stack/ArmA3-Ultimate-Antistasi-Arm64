@@ -1174,6 +1174,85 @@ A3GM_fnc_betterRadios = {
         _unlocked joinString ", ", missionNamespace getVariable ["TFAR_disableAutoMute", "?"]];
 };
 
+// MAPEXPORT: what a custom base map needs, logged once (a few minutes, run on an empty server):
+//   A3MX|begin|world|size|cells                 heights grid: cells per side (16 m on Chernarus Redux)
+//   A3MX|h|row|part|hex                          heights, rows south to north, 256 cells a part: 00 sea,
+//                                                else 1 + height/1.5 m; then sea depth as A3MX|d (00 land, 1 + depth/1 m)
+//   A3MX|f|row|hex                               tree density, 64 m cells: trees counted within 45 m (capped 255)
+//   A3MX|r|type|x1|y1|x2|y2|width|bridge         one per road segment (getRoadInfo)
+//   A3MX|b|x|y|dir|width|length|kind             one per building (terrain objects)
+//   A3MX|end|roads|buildings|seconds
+A3GM_fnc_mapExport = {
+    if (!isNil "A3GM_exporting") exitWith { [false, "already exporting"] };
+    A3GM_exporting = true;
+    [] spawn {
+        private _t0 = diag_tickTime;
+        private _size = worldSize;
+        private _n = round (_size / 16);
+        private _step = _size / _n;
+        private _digits = "0123456789abcdef" splitString "";
+        private _hex = [];
+        { private _hi = _x; { _hex pushBack (_hi + _x) } forEach _digits } forEach _digits;
+        diag_log text format ["A3MX|begin|%1|%2|%3", worldName, _size, _n];
+        for "_r" from 0 to _n - 1 do {
+            private _y = (_r + 0.5) * _step;
+            private _parts = ceil (_n / 256);
+            for "_part" from 0 to _parts - 1 do {
+                private _h = []; private _d = [];
+                for "_c" from _part * 256 to (((_part + 1) * 256) min _n) - 1 do {
+                    private _z = getTerrainHeightASL [(_c + 0.5) * _step, _y];
+                    _h pushBack (_hex select ([0, 1 + (254 min round (_z / 1.5))] select (_z > 0)));
+                    _d pushBack (_hex select ([0, 1 + (254 min round (- _z))] select (_z <= 0)));
+                };
+                diag_log text format ["A3MX|h|%1|%2|%3", _r, _part, _h joinString ""];
+                diag_log text format ["A3MX|d|%1|%2|%3", _r, _part, _d joinString ""];
+            };
+            if (_r % 16 == 0) then { sleep 0.01 };
+        };
+        // trees, 64 m cells
+        private _fn = round (_size / 64); private _fs = _size / _fn;
+        for "_r" from 0 to _fn - 1 do {
+            private _row = [];
+            for "_c" from 0 to _fn - 1 do {
+                private _k = count nearestTerrainObjects [[(_c + 0.5) * _fs, (_r + 0.5) * _fs], ["TREE", "SMALL TREE"], 45, false, true];
+                _row pushBack (_hex select (_k min 255));
+            };
+            diag_log text format ["A3MX|f|%1|%2", _r, _row joinString ""];
+            sleep 0.01;
+        };
+        // roads
+        private _center = [_size / 2, _size / 2];
+        private _roads = _center nearRoads (_size * 0.75);
+        {
+            private _i = getRoadInfo _x;
+            _i params ["_type", "_width", "_ped", "", "", "", "_beg", "_end", "_bridge"];
+            if (count _beg >= 2 && {count _end >= 2}) then {
+                diag_log text format ["A3MX|r|%1|%2|%3|%4|%5|%6|%7", _type, round (_beg select 0), round (_beg select 1),
+                    round (_end select 0), round (_end select 1), round _width, [0, 1] select _bridge];
+            };
+            if (_forEachIndex % 500 == 0) then { sleep 0.01 };
+        } forEach _roads;
+        // buildings
+        private _kinds = ["BUILDING", "HOUSE", "CHURCH", "CHAPEL", "FUEL STATION", "HOSPITAL", "LIGHTHOUSE", "FORTRESS",
+            "BUNKER", "POWER LINES", "TRANSMITTER", "WATERTOWER", "RUIN", "VIEW-TOWER", "POWERSOLAR", "POWERWIND", "SHIPWRECK"];
+        private _blds = nearestTerrainObjects [_center, _kinds - ["POWER LINES"], _size * 0.75, false, true];
+        {
+            private _bb = boundingBoxReal _x;
+            private _w = abs (((_bb select 1) select 0) - ((_bb select 0) select 0));
+            private _l = abs (((_bb select 1) select 1) - ((_bb select 0) select 1));
+            if (_w > 2 && {_l > 2} && {_w < 200} && {_l < 200}) then {
+                private _p = getPosWorld _x;
+                diag_log text format ["A3MX|b|%1|%2|%3|%4|%5|%6", round (_p select 0), round (_p select 1), round getDir _x,
+                    round _w, round _l, (getModelInfo _x) select 0];
+            };
+            if (_forEachIndex % 500 == 0) then { sleep 0.01 };
+        } forEach _blds;
+        diag_log text format ["A3MX|end|%1|%2|%3", count _roads, count _blds, round (diag_tickTime - _t0)];
+        A3GM_exporting = nil;
+    };
+    [true, "map export started"]
+};
+
 // The map's grid convention, for the Game Master's targeting: mapGridPosition at known positions
 A3GM_fnc_gridInfo = {
     private _probe = [[50, 50], [1050, 50], [50, 1050], [worldSize - 50, worldSize - 50]];
@@ -1199,7 +1278,8 @@ A3GM_actions = createHashMapFromArray [
     ["UAV", A3GM_fnc_uav],
     ["TRANSPORT", A3GM_fnc_transport],
     ["CANCEL", A3GM_fnc_cancel],
-    ["GRIDINFO", A3GM_fnc_gridInfo]
+    ["GRIDINFO", A3GM_fnc_gridInfo],
+    ["MAPEXPORT", A3GM_fnc_mapExport]
 ];
 
 // Chat relay. Each player's client sends the chat its own player types here; the sender comes
@@ -1310,10 +1390,17 @@ A3GM_chatTrace = true; publicVariable "A3GM_chatTrace";  // TODO: off once chat 
 
 [] spawn {
     // Antistasi's own server init has to finish first (factions, sides).
-    waitUntil { sleep 2; missionNamespace getVariable ["serverInitDone", false] };
-    call A3GM_fnc_betterRadios;
-    diag_log text "A3GM|ready";
+    // Commands are taken at once; game actions wait for the campaign (Antistasi loads it when the first player
+    // joins), only these work before: chat, the grid convention, the map export.
+    private _preInit = ["SAY", "GRIDINFO", "MAPEXPORT"];
+    private _readyLogged = false;
+    diag_log text "A3GM|listening";
     while { true } do {
+        if (!_readyLogged && {missionNamespace getVariable ["serverInitDone", false]}) then {
+            _readyLogged = true;
+            call A3GM_fnc_betterRadios;
+            diag_log text "A3GM|ready";
+        };
         private _raw = "a3gm" callExtension "poll";
         if (_raw isEqualTo "") then {
             sleep 0.1;  // commands are picked up within 0.1 s; the extension call is cheap
@@ -1324,7 +1411,9 @@ A3GM_chatTrace = true; publicVariable "A3GM_chatTrace";  // TODO: off once chat 
             private _fn = A3GM_actions getOrDefault [_action, {}];
             private _res = [false, "unknown action"];
             if (_action in A3GM_actions) then {
-                _res = _args call _fn;
+                _res = if (!_readyLogged && {!(_action in _preInit)}) then {
+                    [false, "the campaign hasn't started yet: it loads when the first player joins"]
+                } else { _args call _fn };
                 if (!(_res isEqualType []) || {count _res < 2}) then { _res = [false, "no result"] };
             };
             _res params [["_ok", false, [false]], ["_detail", ""]];
