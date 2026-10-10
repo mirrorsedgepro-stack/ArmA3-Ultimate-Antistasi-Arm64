@@ -522,10 +522,16 @@ A3GM_fnc_betterRadios = {
         } forEach [
             ["TFAR_DefaultRadio_Rifleman_Independent", "TFAR_anprc148jem"],
             ["TFAR_DefaultRadio_Personal_Independent", "TFAR_anprc148jem"],
-            ["TFAR_DefaultRadio_Backpack_Independent", "TFAR_anprc155"]
+            ["TFAR_DefaultRadio_Backpack_Independent", "TFAR_anprc155"],
+            // OVERLORD speaks by whispering into the TFAR channel from a TeamSpeak bot. Current TFAR plugins
+            // (1.-1.0.341) hard-mute every TeamSpeak client that isn't in the game, so players heard nothing
+            // (only an outdated plugin let it through). Without the automatic mute TFAR still decides who hears
+            // whom, through voice volume instead (a little more CPU on each player's PC).
+            ["TFAR_disableAutoMute", true]
         ];
     };
-    diag_log text format ["A3GM|radios|unlocked %1; default handheld TFAR_anprc148jem", _unlocked joinString ", "];
+    diag_log text format ["A3GM|radios|unlocked %1; default handheld TFAR_anprc148jem; TFAR_disableAutoMute %2",
+        _unlocked joinString ", ", missionNamespace getVariable ["TFAR_disableAutoMute", "?"]];
 };
 
 A3GM_actions = createHashMapFromArray [
