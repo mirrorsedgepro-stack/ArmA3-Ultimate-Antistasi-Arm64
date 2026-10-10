@@ -18,7 +18,8 @@ Usage: ./scripts/manage.sh [command]
 Commands:
   start          Start the server in background (runs pre-flight checks)
   stop           Stop the server gracefully
-  restart        Restart the server
+  restart        Restart every container (Arma, TeamSpeak, audio bot, telemetry)
+  restart-arma   Restart only the Arma server (TeamSpeak and Overlord stay up)
   status         Show container status, resource usage, and active ports
   logs           Follow live server output logs
   steam-login [code] Perform one-time Steam Guard authentication (interactive or with code)
@@ -66,9 +67,16 @@ cmd_stop() {
 }
 
 cmd_restart() {
-    echo "Restarting server container..."
+    echo "Restarting all containers (Arma, TeamSpeak, audio bot, telemetry)..."
     docker compose restart
     echo "Server restarted."
+}
+
+cmd_restart_arma() {
+    # Only the game server (and its headless clients): TeamSpeak and the Game Master's audio bot stay up.
+    echo "Restarting the Arma server only..."
+    docker compose restart arma3
+    echo "Arma server restarted."
 }
 
 cmd_status() {
@@ -154,6 +162,9 @@ case "$COMMAND" in
         ;;
     restart)
         cmd_restart
+        ;;
+    restart-arma)
+        cmd_restart_arma
         ;;
     status)
         cmd_status

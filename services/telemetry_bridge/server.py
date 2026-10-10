@@ -14,6 +14,8 @@ Every value served here is observed, never invented:
                                      "Player X disconnected." engine log lines,
                                      persisted to /data so they survive restarts.
   * Server settings ................ Parsed from the mounted configs/main.cfg.
+  * OVERLORD training .............. The Game Master's trainer link (openclaw-gm, 127.0.0.1:8765), reduced
+                                     to what the public page shows (/api/training).
 
 When something is unknown the field is null; the frontend must show "unknown".
 """
@@ -49,6 +51,7 @@ MAP_POSITION_DELAY = max(0, int(os.environ.get("MAP_POSITION_DELAY", "0") or 0))
 MAP_SHOW_HQ = os.environ.get("MAP_SHOW_HQ", "true").strip().lower() not in ("0", "false", "no")
 
 A2S_CACHE_SEC = 3.0
+GM_TRAINING_URL = os.environ.get("GM_TRAINING_URL", "http://127.0.0.1:8765/api/training")
 
 
 def now_utc():
@@ -887,6 +890,40 @@ def build_history(hours, bucket_minutes):
 
 # ---------------------------------------------------------------------------
 # HTTP
+def build_training():
+    """OVERLORD's training state for the monitor: which Sparks are training, progress, quality, data."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(GM_TRAINING_URL, timeout=3) as resp:
+            raw = json.loads(resp.read())
+    except Exception:
+        return {"available": False}
+    s1 = raw.get("spark1") or {}
+    pick = lambda d, keys: {k: d.get(k) for k in keys if d.get(k) is not None}
+    export = s1.get("last_export") or {}
+    deployed = raw.get("deployed") or {}
+    return {
+        "available": True,
+        "observedAt": iso(datetime.fromtimestamp(raw.get("time") or time.time(), timezone.utc)),
+        "mode": raw.get("mode"),                 # gameplay | cluster | idle-empty
+        "playersOnline": raw.get("players", 0),
+        "trainer": pick(s1, ["state", "cycle", "step", "total_steps", "loss", "eta_s", "nodes", "samples",
+                             "real_samples", "held_out", "samples_per_s", "updated", "started", "eval_loss",
+                             "eval_score", "available", "waiting_for", "trained_on", "resumed"]),
+        "error": (s1.get("error") or "")[:160] if s1.get("state") == "error" else None,
+        "lastExport": pick(export, ["gguf", "cycle", "samples", "eval_loss", "eval_score", "created"]),
+        "deployed": {"model": deployed.get("model"), "since": deployed.get("since"),
+                     "score": (deployed.get("score") or {}).get("score"),
+                     "latency": (deployed.get("score") or {}).get("latency"),
+                     "previous": deployed.get("previous")},
+        "peer": raw.get("peer") or {},
+        "generating": bool(raw.get("generating")),
+        "data": raw.get("data") or {},
+        "history": [pick(h, ["t", "cycle", "step", "loss", "nodes"]) for h in (raw.get("history") or [])][-240:],
+        "events": (raw.get("events") or [])[-15:],
+    }
+
+
 # ---------------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -939,6 +976,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/events":
                 limit = max(1, min(500, int(q.get("limit", ["100"])[0])))
                 return self._send(200, build_events(limit))
+            if path == "/api/training":
+                return self._send(200, build_training())
             if path == "/api/history":
                 hours = max(1, min(24 * 30, int(q.get("hours", ["24"])[0])))
                 bucket = max(1, min(240, int(q.get("bucket", ["15"])[0])))

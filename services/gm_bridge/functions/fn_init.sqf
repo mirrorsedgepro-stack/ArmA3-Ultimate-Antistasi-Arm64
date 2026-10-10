@@ -562,7 +562,9 @@ A3GM_fnc_chatIn = {
 
 // AI talk the players see: Antistasi HQ messages and AI squad callouts (Side, Command, Group).
 // Every client in the squad/side reports the same line, so repeats within 10 s are dropped.
-//   A3AICHAT|channel|side|speaker|text
+//   A3AICHAT|channel|side|speaker|text[|@x,y,dir]
+// The speaker's position and facing (when it's a unit in the reporting player's group) let the Game Master
+// put callouts like "Contact - infantry - 300m - South" on the battle net.
 A3GM_aiSeen = createHashMap;
 A3GM_fnc_aiChatIn = {
     params [["_channel", -1, [0]], ["_text", "", [""]], ["_speaker", "", [""]]];
@@ -575,8 +577,15 @@ A3GM_fnc_aiChatIn = {
     if (count A3GM_aiSeen > 500) then { A3GM_aiSeen = createHashMap };
     A3GM_aiSeen set [_key, time];
     _text = ((_text splitString toString [10, 13]) joinString " ") select [0, 300];
-    diag_log text format ["A3AICHAT|%1|%2|%3|%4", _channel, side group (allPlayers select _idx),
-        (_speaker select [0, 60]) call A3GM_fnc_clean, _text call A3GM_fnc_clean];
+    private _player = allPlayers select _idx;
+    private _where = "";
+    private _unit = (units group _player) select { name _x == _speaker };
+    if (_unit isNotEqualTo []) then {
+        private _u = _unit select 0;
+        _where = format ["|@%1,%2,%3", round ((getPosATL _u) select 0), round ((getPosATL _u) select 1), round (getDir _u)];
+    };
+    diag_log text format ["A3AICHAT|%1|%2|%3|%4%5", _channel, side group _player,
+        (_speaker select [0, 60]) call A3GM_fnc_clean, _text call A3GM_fnc_clean, _where];
 };
 
 // Clients confirm the hook, and (while A3GM_chatTrace is on) describe each chat line they see, so

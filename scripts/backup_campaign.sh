@@ -21,19 +21,24 @@ echo "=== Starting Antistasi Campaign Backup ==="
 echo "Source: ${PROFILES_DIR}"
 echo "Destination: ${BACKUP_FILE}"
 
-if [ ! -d "$PROFILES_DIR" ] || [ -z "$(ls -A "$PROFILES_DIR" 2>/dev/null)" ]; then
-    echo "Warning: No profile data found in ${PROFILES_DIR} yet (server might not have created a save yet)."
-    # If directory exists even if empty, create a placeholder archive
-    if [ -d "$PROFILES_DIR" ]; then
-        tar -czf "$BACKUP_FILE" -C "${ROOT_DIR}/configs" profiles
-    else
-        echo "Creating empty profile directory and aborting backup."
-        mkdir -p "$PROFILES_DIR"
-        exit 0
-    fi
-else
-    # Create compressed archive of profiles directory
-    tar -czf "$BACKUP_FILE" -C "${ROOT_DIR}/configs" profiles
+if [ ! -d "$PROFILES_DIR" ]; then
+    echo "Creating empty profile directory and aborting backup (no save yet)."
+    mkdir -p "$PROFILES_DIR"
+    exit 0
+fi
+
+# The server writes its profiles as root, so the archive is made by a throwaway container (read-only mount)
+# rather than by this user, who can't read them. Works whether or not the server is running.
+IMAGE="${BACKUP_IMAGE:-arma3-antistasi:latest}"
+if ! docker run --rm --entrypoint tar -v "${ROOT_DIR}/configs:/configs:ro" "$IMAGE" \
+        -czf - -C /configs profiles > "${BACKUP_FILE}.tmp"; then
+    rm -f "${BACKUP_FILE}.tmp"
+    echo "Error: could not archive ${PROFILES_DIR}." >&2
+    exit 1
+fi
+mv "${BACKUP_FILE}.tmp" "$BACKUP_FILE"
+if ! tar -tzf "$BACKUP_FILE" | grep -q '\.vars\.Arma3Profile$'; then
+    echo "Warning: the archive holds no campaign save (*.vars.Arma3Profile) yet." >&2
 fi
 
 BACKUP_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
