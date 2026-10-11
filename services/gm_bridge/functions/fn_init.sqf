@@ -1260,6 +1260,32 @@ A3GM_fnc_gridInfo = {
         (_probe apply { format ["%1,%2=%3", _x select 0, _x select 1, mapGridPosition _x] }) joinString " "]]
 };
 
+// Make Steam IDs campaign members, the way Antistasi's own "add member" does (membersX, saved with the campaign).
+// Accepted before the campaign loads: the IDs are added as soon as it has.
+A3GM_fnc_members = {
+    private _uids = _this select { _x isEqualType "" && {_x regexMatch "\d{17}"} };
+    if (_uids isEqualTo []) exitWith { [false, "no Steam IDs"] };
+    private _add = {
+        params ["_uids"];
+        private _new = _uids select { !(_x in membersX) };
+        { membersX pushBackUnique _x } forEach _new;
+        publicVariable "membersX";
+        { if (getPlayerUID _x in _uids) then { _x setVariable ["eligible", true, true] } } forEach allPlayers;
+        diag_log text format ["A3GM|members|%1 added, %2 members%3", count _new, count membersX,
+            ["", " (membership is off in this campaign)"] select !(missionNamespace getVariable ["membershipEnabled", true])];
+        count _new
+    };
+    if (missionNamespace getVariable ["serverInitDone", false] && {!isNil "membersX"}) exitWith {
+        [true, format ["%1 of %2 added", [_uids] call _add, count _uids]]
+    };
+    [_uids, _add] spawn {
+        params ["_uids", "_add"];
+        waitUntil { sleep 5; missionNamespace getVariable ["serverInitDone", false] && {!isNil "membersX"} };
+        [_uids] call _add;
+    };
+    [true, format ["%1 queued until the campaign loads", count _uids]]
+};
+
 A3GM_actions = createHashMapFromArray [
     ["SAY", A3GM_fnc_say],
     ["AIRDROP", A3GM_fnc_airdrop],
@@ -1279,7 +1305,8 @@ A3GM_actions = createHashMapFromArray [
     ["TRANSPORT", A3GM_fnc_transport],
     ["CANCEL", A3GM_fnc_cancel],
     ["GRIDINFO", A3GM_fnc_gridInfo],
-    ["MAPEXPORT", A3GM_fnc_mapExport]
+    ["MAPEXPORT", A3GM_fnc_mapExport],
+    ["MEMBERS", A3GM_fnc_members]
 ];
 
 // Chat relay. Each player's client sends the chat its own player types here; the sender comes
@@ -1391,8 +1418,8 @@ A3GM_chatTrace = true; publicVariable "A3GM_chatTrace";  // TODO: off once chat 
 [] spawn {
     // Antistasi's own server init has to finish first (factions, sides).
     // Commands are taken at once; game actions wait for the campaign (Antistasi loads it when the first player
-    // joins), only these work before: chat, the grid convention, the map export.
-    private _preInit = ["SAY", "GRIDINFO", "MAPEXPORT"];
+    // joins), only these work before: chat, the grid convention, the map export, members (queued).
+    private _preInit = ["SAY", "GRIDINFO", "MAPEXPORT", "MEMBERS"];
     private _readyLogged = false;
     diag_log text "A3GM|listening";
     while { true } do {
