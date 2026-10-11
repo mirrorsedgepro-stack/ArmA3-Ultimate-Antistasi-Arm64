@@ -12,16 +12,32 @@ RCON. BattlEye RCON can't run SQF, so the bridge is a server-only addon instead:
 | Action | Args | Effect |
 |---|---|---|
 | `SAY` | text | `OVERLORD: …` from "HQ" in each player's Side channel |
-| `AIRDROP` | `AMMO`/`MEDICAL`/`LAUNCHER`/`SUPPORT`, player | parachuted crate 60-120 m from the player, green smoke on landing |
+| `AIRDROP` | `AMMO`/`MEDICAL`/`LAUNCHER`/`SUPPORT`, player | parachuted crate 60-120 m from the player, green smoke on landing; `AMMO` holds the player's own magazine types; removed after 30 min once nobody is near |
 | `MORTAR` | player, rounds 1-6 | friendly 82 mm rounds on enemies 200-800 m from the player; never within 200 m of any player |
 | `WEATHER` | overcast, rain, fog (≤ 0.5) | immediate weather change |
-| `QRF` | player, size 2-8 | occupant infantry (from `A3A_faction_occ` unit classes) 500-700 m out, search-and-destroy on the player; cleaned up when dead or after 30 min with no player near |
+| `QRF` | player, size 2-8 | occupant infantry (a militia squad from `A3A_faction_occ`, via `A3A_fnc_createUnit`) 500-700 m out, search-and-destroy on the player; cleaned up when dead or after 30 min with no player near |
 | `STATUS` | – | `name@grid:enemiesWithin800m;…` |
 | `INTEL` | player | readable report: grid, nearest town, enemies within 800 m (closest bearing/distance), 3 nearest enemy zones, active Antistasi missions (`A3A_tasksData`) |
 | `AIRSTRIKE` | grid (4-10 digits), player | friendly jet flyby and four 500 lb bombs around the grid; refused within 200 m of any player |
 | `MARK` | id, grid, NATO type (`o_inf`, `o_motor_inf`, `o_mech_inf`, `o_armor`, `o_air`, `o_naval`, `o_art`, `o_recon`, `o_installation`, `o_unknown`), text, reporter | battle net: a contact marker (`HH:MM text`, ColorOPFOR) on the map of the reporter's side only (local markers via JIP `remoteExec`); the same id again replaces it. Faded after 10 min, removed after 15, at most 25 (oldest go) |
 | `UNMARK` | id | removes a contact marker |
+| `FIREMISSION` | grid (6-10 digits), rounds 1-8 | friendly 82 mm rounds on the grid; refused within 200 m of a player or 150 m of the rebel HQ or rebel fighters |
+| `ILLUM` | grid or `""`, player | four illumination rounds over the grid (or the player), one every 35 s |
+| `SMOKE` | grid or `""`, player | 80 m smoke screen for about two minutes at the grid, or 40 m from the player towards the nearest enemy |
+| `MEDEVAC` | id, player, `revive`/`extract`/`auto` | dustoff helicopter: treats the wounded at the LZ, or lifts the casualty to HQ |
+| `BACKUP` | id, player, `air`/`road`/`""` | rebel squad by helicopter or by road, with the player for 15 min |
+| `UAV` | id, player | unarmed UAV over the player for 15 min; what it sees is logged as `A3GM\|uavspot` |
+| `TRANSPORT` | id, player, grid or `HQ` | helicopter pickup to the grid or the rebel HQ |
+| `GUNSHIP` | id, player | armed helicopter orbiting the player for 10 min, weapons free |
+| `MAFIA` | `status` / `relocate` / `racket` / `reveal` / `hit` / `funds` / `playable`, argument | the Mafia Syndicate (`servermods/@a3ue_mafia`, built from `~/Antistasi-Ultimate-Extender`): status report, new hideout, racket in a town (or `""` for a random one), hideout on the map, hit squad on a player, add funds, let players join (`on`/`off`). Fails with `the Mafia extender isn't loaded` without the mod. `INTEL` also reports what the rebels know of it |
+| `CANCEL` | id | recalls that support asset (anyone aboard is put down first); `nothing to cancel` once it's gone |
 | `MISSION` | type (`AS`/`CON`/`DES`/`LOG`/`SUPP`/`RES`/`CONVOY`/`RAN`), player | starts an Antistasi mission via `A3A_fnc_missionRequest` (as Petros does) and returns the new task, or why not |
+
+Support assets log their progress as `A3GM|<asset>|<id>|<stage>|<player>|<detail>` (stages such as `launched`,
+`landing`, `wheelsup`, `arrived`, `onstation`, `rtb`, `failed`, `lost`, `cancelled`). A player name of `@<grid>`
+makes a stand-in there, so they can be flown on an empty server (`scripts/test_support_flights.sh`);
+`@<grid>+15` boards 15 s after the helicopter is down. Air strikes, mortars and fire missions are refused danger
+close: within 200 m of a player or 150 m of the rebel HQ or rebel fighters.
 
 An empty player name means "the player with the most enemies nearby". Every command logs one
 line, which the Game Master waits for:

@@ -6,16 +6,19 @@ cd "$(dirname "$0")/.."
 ./scripts/restart_when_empty.sh || exit 1
 GM=/home/jcee-slave/openclaw-gm
 start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-for c in 'TRANSPORT|ft1|@11781837|12781967' 'MEDEVAC|fm1|@12281573|extract' 'BACKUP|fb1|@12281573|air'; do
+# The transport's stand-in boards 15 s after touchdown, as a player walking to it would (a pilot who has begun to
+# shut down once dropped the take-off order); the gunship is cancelled on its way in.
+for c in 'TRANSPORT|ft1|@11781837+15|12781967' 'MEDEVAC|fm1|@12281573|extract' 'BACKUP|fb1|@12281573|air' \
+         'GUNSHIP|fg1|@12281573' 'QRF|@12281573' 'FIREMISSION|11001100' 'ILLUM|11001100|' 'SMOKE|11001100|' 'CANCEL|fg1'; do
     (cd "$GM" && PYTHONPATH=. timeout 60 ./venv/bin/python main.py --arma-cmd "$c" 2>&1 | grep -oE '\-> (ok|fail): .*$' | tail -1 | sed "s/^/$(date -u +%T) ${c%%|*}: /")
 done
-for _ in $(seq 1 60); do  # up to 15 minutes for all three to finish
-    n=$(docker logs --since "$start" arma3_antistasi 2>&1 | grep -cE 'A3GM\|(transport\|ft1\|(arrived|failed)|medevac\|fm1\|(done|failed)|backup\|fb1\|(arrived|lost|stuck))')
-    [ "$n" -ge 3 ] && break
+for _ in $(seq 1 60); do  # up to 15 minutes for the flights to finish
+    n=$(docker logs --since "$start" arma3_antistasi 2>&1 | grep -cE 'A3GM\|(transport\|ft1\|(arrived|failed)|medevac\|fm1\|(done|failed)|backup\|fb1\|(arrived|lost|stuck)|gunship\|fg1\|(rtb|lost))')
+    [ "$n" -ge 4 ] && break
     sleep 15
 done
 echo "=== stages"
-docker logs --since "$start" arma3_antistasi 2>&1 | grep -E 'A3GM\|(transport\|ft1|medevac\|fm1|backup\|fb1)\|' | cut -c1-160
+docker logs --since "$start" arma3_antistasi 2>&1 | grep -E 'A3GM\|(transport\|ft1|medevac\|fm1|backup\|fb1|gunship\|fg1)\||take-off order repeated' | cut -c1-160
 echo "=== script errors"
 docker logs --since "$start" arma3_antistasi 2>&1 | grep -A6 'Error in expression' | grep -E 'fn_init' | head -5
 echo "$(date -u +%T) done"
