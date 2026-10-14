@@ -1,6 +1,6 @@
-# 32-Player Arma 3 Dedicated Server - Antistasi Ultimate [RHS]
+# 32-Player Arma 3 Dedicated Server - Antistasi Ultimate [CUP]
 
-A production-ready Docker containerization setup for hosting a 32-player **Antistasi Ultimate** campaign with the **RHS Escalation** modset on **Altis**, powered by [BrettMayson/Arma3Server](https://github.com/BrettMayson/Arma3Server).
+A production-ready Docker containerization setup for hosting a 32-player **Antistasi Ultimate** campaign with the **CUP** (Community Upgrade Project) modset on **Chernarus Redux**, powered by [BrettMayson/Arma3Server](https://github.com/BrettMayson/Arma3Server).
 
 ---
 
@@ -9,7 +9,7 @@ A production-ready Docker containerization setup for hosting a 32-player **Antis
 - **Base Image:** `ubuntu:24.04` (ARM64) running [FEX-Emu](https://fex-emu.com/) with a bundled x86_64 Debian userland; SteamCMD, the server and the Headless Clients all run as x86_64 under FEX.
 - **Architecture Support:** ARM64 (`aarch64`) hosts. Building the image needs amd64 emulation for the x86 userland stage, which `./scripts/manage.sh start` sets up automatically.
 - **Mission Framework:** [Antistasi Ultimate](https://steamcommunity.com/sharedfiles/filedetails/?id=3020755032) mod edition on Altis.
-- **Modset:** RHS Escalation suite (AFRF, USAF, GREF, SAF) + CBA_A3.
+- **Modset:** CUP Weapons, Units and Vehicles + CBA_A3.
 - **Headless Clients (HCs):** 3 containerized Headless Clients automatically connected via loopback to distribute AI garrisons, patrols, and QRFs across dedicated CPU cores.
 - **Engine Tuning:** 64-bit binary (`arma3server_x64`), 60 FPS tickrate cap, and high-throughput `basic.cfg` network tuning (2048 msgs/tick, 1 Gbps max bandwidth).
 - **Campaign Persistence:** Automated campaign state resumption (`autoLoadLastGame = 60`) with dedicated automated backup and restore scripts.
@@ -121,7 +121,7 @@ Joining players can synchronize all 41 required mods in seconds:
    - Navigate to the **Mods** tab.
    - Click **Preset** (top right) &rarr; **Import**.
    - Select `preset.html`.
-3. The launcher will automatically prompt players to subscribe to and download any missing mods from the Steam Workshop. The full modset (RHS, Antistasi Ultimate, ACE, JSRS, Blastcore and the rest) is listed in `configs/preset.html`, the single source of truth for the server's mods.
+3. The launcher will automatically prompt players to subscribe to and download any missing mods from the Steam Workshop. The full modset (CUP, Antistasi Ultimate, ACE, JSRS, Blastcore and the rest) is listed in `configs/preset.html`, the single source of truth for the server's mods.
 4. Players launch Arma 3 with the preset loaded, go to **Server Browser** &rarr; **Direct Connect**, and enter your server IP and port `2302`.
 
 ### TeamSpeak & TFAR
@@ -194,7 +194,7 @@ sudo ufw allow 9987/udp
    ```
 2. **First Time Campaign Initialization:**
    - The server auto-launches into `Antistasi_Altis.Altis`.
-   - The logged-in admin selects the rebel faction, enemy occupier faction (e.g. RHS USAF or AFRF), and invader faction.
+   - The logged-in admin selects the rebel faction, enemy occupier faction (e.g. CUP US Army or CUP Russia), and invader faction.
    - Click **Start Campaign**.
 3. **Resuming Saved Games:**
    - `main.cfg` includes `autoLoadLastGame = 60;`. When the server restarts, it automatically reloads your campaign state 60 seconds after a player joins.

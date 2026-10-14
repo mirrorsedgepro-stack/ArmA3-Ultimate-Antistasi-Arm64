@@ -20,6 +20,7 @@ Commands:
   stop           Stop the server gracefully
   restart        Restart every container (Arma, TeamSpeak, audio bot, telemetry)
   restart-arma   Restart only the Arma server (TeamSpeak and Overlord stay up)
+  schedule-restart  Install a cron job that restarts the Arma server every 12 h, once it is empty
   status         Show container status, resource usage, and active ports
   logs           Follow live server output logs
   steam-login [code] Perform one-time Steam Guard authentication (interactive or with code)
@@ -67,9 +68,18 @@ cmd_stop() {
 }
 
 cmd_restart() {
+    preflight
     echo "Restarting all containers (Arma, TeamSpeak, audio bot, telemetry)..."
     docker compose restart
     echo "Server restarted."
+}
+
+cmd_schedule_restart() {
+    # 00:00 and 12:00 UTC; restart_when_empty.sh waits until nobody is online, backs up, then restarts arma3 only.
+    # flock skips the run if the previous one is still waiting for an empty server.
+    local line="0 */12 * * * cd ${ROOT_DIR} && flock -n /tmp/armaa_restart.lock env EMPTY_FOR=60 ./scripts/restart_when_empty.sh >> logs/scheduled_restart.log 2>&1"
+    { crontab -l 2>/dev/null | grep -vF 'restart_when_empty.sh'; echo "$line"; } | crontab -
+    echo "Installed:"; crontab -l | grep -F 'restart_when_empty.sh'
 }
 
 cmd_restart_arma() {
@@ -165,6 +175,9 @@ case "$COMMAND" in
         ;;
     restart-arma)
         cmd_restart_arma
+        ;;
+    schedule-restart)
+        cmd_schedule_restart
         ;;
     status)
         cmd_status
