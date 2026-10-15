@@ -367,6 +367,9 @@ A3GM_fnc_unmark = {
 //   A3GM|medevac|id|stage|player|detail   stage: launched, landing, landed, healed, aboard, wheelsup, hq, done, failed
 A3GM_medevacHelis = ["I_Heli_Transport_02_F", "I_Heli_light_03_unarmed_F", "B_Heli_Transport_01_F", "B_Heli_Light_01_F",
     "O_Heli_Light_02_unarmed_F", "O_Heli_Transport_04_covered_F"];
+A3GM_backupHelis = ["I_Heli_Transport_02_F", "B_Heli_Transport_01_F", "O_Heli_Transport_04_covered_F",
+    "B_Heli_Transport_03_F", "CUP_I_UH60M_Unarmed_ION", "CUP_B_UH60M_US", "CUP_B_CH47F_USA",
+    "CUP_O_Mi8_VVS_Underslung", "CUP_I_Mi17_UN", "I_Heli_light_03_unarmed_F", "O_Heli_Light_02_unarmed_F"];
 
 // The available classes from a list, the given side's own first (I_ independent, B_ west, O_ east)
 A3GM_fnc_sideClasses = {
@@ -724,14 +727,14 @@ A3GM_fnc_rebelHQ = {
 
 // A helicopter with an AI crew of the player's side, flying in from HQ (or 3 km out on the HQ side)
 A3GM_fnc_spawnHeli = {
-    params ["_target", "_side", ["_classes", A3GM_medevacHelis]];
+    params ["_target", "_side", ["_classes", A3GM_medevacHelis], ["_offset", [0, 0, 0]]];
     private _class = [_classes, _side] call A3GM_fnc_sideClasses param [0, ""];
     if (_class == "") exitWith { objNull };
     private _hq = [_target] call A3GM_fnc_rebelHQ;
     // from HQ when that's 1.5-6 km away, else 3 km out on the HQ side (a caller at HQ had it appear overhead)
     private _d = _target distance2D _hq;
     private _start = if (_d > 1500 && {_d < 6000}) then { _hq } else { _target getPos [3000, _target getDir _hq] };
-    _start = [_start select 0, _start select 1, 150];
+    _start = [(_start select 0) + (_offset select 0), (_start select 1) + (_offset select 1), 150 + (_offset select 2)];
     private _heli = createVehicle [_class, _start, [], 0, "FLY"];
     _heli setPosATL _start;
     _heli setDir (_start getDir _target);
@@ -745,38 +748,200 @@ A3GM_fnc_spawnHeli = {
     _heli
 };
 
-// A rebel squad from Antistasi's rebel templates (vanilla guerrillas if they're missing)
-A3GM_fnc_rebelSquad = {
-    params ["_side", "_pos", ["_n", 6]];
-    private _grp = createGroup [_side, true];
-    private _isReb = _side == (missionNamespace getVariable ["teamPlayer", independent]);
-    private _reb = if (_isReb) then { missionNamespace getVariable ["A3A_faction_reb", createHashMap] } else { createHashMap };
-    private _prefix = ["I_G_", "B_", "O_"] select (([independent, west, east] find _side) max 0);
-    private _types = ["unitSL", "unitMG", "unitRifle", "unitLAT", "unitMedic", "unitRifle", "unitGL", "unitRifle"]
-        apply { _reb getOrDefault [_x, ""] } select [0, _n];
+// High-tier military combat loadouts for backup troops
+A3GM_fnc_equipMilitaryUnit = {
+    params ["_unit", "_role", "_side"];
+    removeAllWeapons _unit;
+    removeAllItems _unit;
+    removeAllAssignedItems _unit;
+    removeUniform _unit;
+    removeVest _unit;
+    removeBackpack _unit;
+    removeHeadgear _unit;
+    removeGoggles _unit;
+
+    private _isIndep = _side == independent;
+    private _isWest = _side == west;
+
+    private _uniform = switch (true) do {
+        case _isWest: { "U_B_CombatUniform_mcam" };
+        case _isIndep: { "U_I_CombatUniform" };
+        default { "U_O_CombatUniform_ocamo" };
+    };
+    if (!isClass (configFile >> "CfgWeapons" >> _uniform)) then { _uniform = "U_I_CombatUniform" };
+
+    private _vest = switch (true) do {
+        case _isWest: { "V_PlateCarrier2_rgr" };
+        case _isIndep: { "V_PlateCarrierIA2_dgtl" };
+        default { "V_HarnessO_brn" };
+    };
+    if (!isClass (configFile >> "CfgWeapons" >> _vest)) then { _vest = "V_PlateCarrier1_rgr" };
+
+    private _headgear = switch (true) do {
+        case _isWest: { "H_HelmetB" };
+        case _isIndep: { "H_HelmetIA" };
+        default { "H_HelmetO_ocamo" };
+    };
+    if (!isClass (configFile >> "CfgWeapons" >> _headgear)) then { _headgear = "H_HelmetB" };
+
+    private _backpack = switch (true) do {
+        case _isWest: { "B_AssaultPack_mcamo" };
+        case _isIndep: { "B_AssaultPack_dgtl" };
+        default { "B_FieldPack_ocamo" };
+    };
+    if (!isClass (configFile >> "CfgVehicles" >> _backpack)) then { _backpack = "B_AssaultPack_rgr" };
+
+    _unit forceAddUniform _uniform;
+    _unit addVest _vest;
+    _unit addHeadgear _headgear;
+    _unit addBackpack _backpack;
+
+    private _primary = "";
+    private _primaryMags = [];
+    private _secondary = "";
+    private _secondaryMags = [];
+    private _handgun = "hgun_P07_F";
+    private _handgunMag = "16Rnd_9x21_Mag";
+    private _optic = "optic_ACO_grn";
+
+    switch (_role) do {
+        case "SL": {
+            _primary = if (_isIndep) then { "arifle_Mk20_GL_F" } else { if (_isWest) then { "arifle_MX_GL_F" } else { "arifle_Katiba_GL_F" } };
+            _optic = if (_isIndep) then { "optic_MRCO" } else { "optic_Hamr" };
+            _primaryMags = [["30Rnd_556x45_Stanag", 8], ["1Rnd_HE_Grenade_shell", 4], ["1Rnd_Smoke_Grenade_shell", 2]];
+            _unit addWeapon "Binocular";
+        };
+        case "MG": {
+            _primary = if (_isIndep) then { "LMG_Mk200_F" } else { if (_isWest) then { "arifle_MX_SW_F" } else { "LMG_Zafir_F" } };
+            _optic = "optic_Holosight";
+            private _mag = if (_isIndep) then { "200Rnd_65x39_cased_Box" } else { if (_isWest) then { "100Rnd_65x39_caseless_mag" } else { "150Rnd_762x54_Box" } };
+            _primaryMags = [[_mag, 4]];
+        };
+        case "LAT": {
+            _primary = if (_isIndep) then { "arifle_Mk20_F" } else { if (_isWest) then { "arifle_MX_F" } else { "arifle_Katiba_F" } };
+            _primaryMags = [["30Rnd_556x45_Stanag", 6]];
+            _secondary = if (_isIndep) then { "launch_NLAW_F" } else { if (_isWest) then { "launch_NLAW_F" } else { "launch_RPG32_F" } };
+            _secondaryMags = [["NLAW_F", 2], ["RPG32_F", 2]] select (!_isIndep && !_isWest);
+        };
+        case "MEDIC": {
+            _primary = if (_isIndep) then { "arifle_Mk20C_F" } else { if (_isWest) then { "arifle_MXC_F" } else { "arifle_Katiba_C_F" } };
+            _primaryMags = [["30Rnd_556x45_Stanag", 6]];
+        };
+        case "MARKSMAN": {
+            _primary = if (_isIndep) then { "srifle_DMR_06_camo_F" } else { if (_isWest) then { "srifle_EBR_F" } else { "srifle_DMR_01_F" } };
+            _optic = "optic_SOS";
+            _primaryMags = [["20Rnd_762x51_Mag", 7], ["10Rnd_762x54_Mag", 7]] select (!_isIndep && !_isWest);
+            _unit addWeapon "Binocular";
+        };
+        case "GL": {
+            _primary = if (_isIndep) then { "arifle_Mk20_GL_F" } else { if (_isWest) then { "arifle_MX_GL_F" } else { "arifle_Katiba_GL_F" } };
+            _primaryMags = [["30Rnd_556x45_Stanag", 6], ["1Rnd_HE_Grenade_shell", 6], ["1Rnd_Smoke_Grenade_shell", 2]];
+        };
+        default {
+            _primary = if (_isIndep) then { "arifle_Mk20_F" } else { if (_isWest) then { "arifle_MX_F" } else { "arifle_Katiba_F" } };
+            _primaryMags = [["30Rnd_556x45_Stanag", 7]];
+        };
+    };
+
+    if (!isClass (configFile >> "CfgWeapons" >> _primary)) then {
+        _primary = "arifle_Mk20_F";
+        _primaryMags = [["30Rnd_556x45_Stanag", 6]];
+    };
+
     {
-        private _u = objNull;
-        if (_x isNotEqualTo "" && {!isNil "A3A_fnc_createUnit"}) then {
-            _u = [_grp, _x, _pos, [], 5, "NONE"] call A3A_fnc_createUnit;
+        _x params ["_magClass", "_count"];
+        if (isClass (configFile >> "CfgMagazines" >> _magClass)) then {
+            for "_m" from 1 to _count do { _unit addMagazine _magClass };
         };
-        if (isNil "_u" || {isNull _u}) then {
-            _u = _grp createUnit [_prefix + (["Soldier_SL_F", "Soldier_AR_F", "Soldier_F", "Soldier_LAT_F", "medic_F",
-                "Soldier_F", "Soldier_GL_F", "Soldier_F"] select (_forEachIndex min 7)), _pos, [], 5, "NONE"];
+    } forEach _primaryMags;
+
+    if (_secondary != "" && {isClass (configFile >> "CfgWeapons" >> _secondary)}) then {
+        {
+            _x params ["_magClass", "_count"];
+            if (isClass (configFile >> "CfgMagazines" >> _magClass)) then {
+                for "_m" from 1 to _count do { _unit addMagazine _magClass };
+            };
+        } forEach _secondaryMags;
+        _unit addWeapon _secondary;
+    };
+
+    _unit addWeapon _primary;
+    if (_optic != "" && {isClass (configFile >> "CfgWeapons" >> _optic)}) then {
+        _unit addPrimaryWeaponItem _optic;
+    };
+
+    if (isClass (configFile >> "CfgWeapons" >> _handgun) && {isClass (configFile >> "CfgMagazines" >> _handgunMag)}) then {
+        _unit addMagazine _handgunMag;
+        _unit addMagazine _handgunMag;
+        _unit addWeapon _handgun;
+    };
+
+    if (!isNil "ace_medical_treatment_fnc_fullHealLocal") then {
+        for "_i" from 1 to 8 do { _unit addItem "ACE_fieldDressing" };
+        for "_i" from 1 to 4 do { _unit addItem "ACE_morphine" };
+        for "_i" from 1 to 2 do { _unit addItem "ACE_tourniquet" };
+        for "_i" from 1 to 2 do { _unit addItem "ACE_splint" };
+        if (_role == "MEDIC") then {
+            for "_i" from 1 to 15 do { _unit addItem "ACE_elasticBandage" };
+            for "_i" from 1 to 15 do { _unit addItem "ACE_packingBandage" };
+            for "_i" from 1 to 8 do { _unit addItem "ACE_epinephrine" };
+            for "_i" from 1 to 4 do { _unit addItem "ACE_salineIV_500" };
+            _unit addItem "ACE_surgicalKit";
         };
-    } forEach _types;
+    } else {
+        for "_i" from 1 to ([3, 10] select (_role == "MEDIC")) do { _unit addItem "FirstAidKit" };
+        if (_role == "MEDIC") then { _unit addItem "Medikit" };
+    };
+
+    _unit addItem "MiniGrenade";
+    _unit addItem "MiniGrenade";
+    _unit addItem "SmokeShell";
+    _unit addItem "SmokeShellGreen";
+
+    _unit linkItem "ItemMap";
+    _unit linkItem "ItemCompass";
+    _unit linkItem "ItemWatch";
+    _unit linkItem "NVGoggles";
+
+    private _radio = missionNamespace getVariable ["A3GM_radioItem", "ItemRadio"];
+    if (isClass (configFile >> "CfgWeapons" >> _radio)) then { _unit linkItem _radio };
+
+    _unit selectWeapon (primaryWeapon _unit);
+};
+
+// High-tier equipped combat squad for backup
+A3GM_fnc_rebelSquad = {
+    params ["_side", "_pos", ["_n", 8]];
+    private _grp = createGroup [_side, true];
+    private _roles = ["SL", "MG", "LAT", "MEDIC", "MARKSMAN", "GL", "RIFLE", "RIFLE", "MG", "LAT", "RIFLE", "RIFLE", "RIFLE", "RIFLE", "RIFLE", "RIFLE"];
+    for "_i" from 0 to (_n - 1) do {
+        private _role = _roles select (_i mod count _roles);
+        private _u = _grp createUnit ["I_G_Soldier_F", _pos, [], 5, "NONE"];
+        [_u, _role, _side] call A3GM_fnc_equipMilitaryUnit;
+        if (!isNil "A3A_fnc_initRevive") then { [_u] call A3A_fnc_initRevive };
+        _u setVariable ["spawner", true, true];
+    };
+    _grp selectLeader ((units _grp) select 0);
     _grp setBehaviour "AWARE";
     _grp setCombatMode "RED";
     _grp
 };
 
-// The squad sticks with the player for 15 minutes, then is removed once no player is near
+// The squad sticks with the player as a bodyguard squad for 15 minutes, then is removed once no player is near
 A3GM_fnc_backupEscort = {
     params ["_asset", "_id", "_target", "_grp", ["_vehicles", []]];
     if (_vehicles isEqualType objNull) then { _vehicles = [_vehicles] };
     private _end = time + 900;
     while { time < _end && {({ alive _x } count units _grp) > 0} && {!([_id] call A3GM_fnc_cancelled)} } do {
-        if (alive _target) then { _grp move (_target getPos [15, random 360]) };
-        sleep 20;
+        if (alive _target) then {
+            if ((leader _grp) distance2D _target > 35) then {
+                _grp setSpeedMode "FULL";
+                _grp move (_target getPos [12 + random 10, random 360]);
+            } else {
+                _grp setSpeedMode "NORMAL";
+            };
+        };
+        sleep 10;
     };
     if ([_id] call A3GM_fnc_cancelled) exitWith {
         [_asset, _id, "cancelled", _target, ""] call A3GM_fnc_supportLog;
@@ -789,192 +954,153 @@ A3GM_fnc_backupEscort = {
     deleteGroup _grp;
 };
 
-// The squad goes the rest of the way by helicopter: no road route, or its vehicle broke down far out
-A3GM_fnc_backupFlyIn = {
-    params ["_id", "_target", "_squad", ["_vehicles", []]];
-    private _heli = [_target, side _squad] call A3GM_fnc_spawnHeli;
-    if (isNull _heli) exitWith { ["backup", _id, "lost", _target, "no route"] call A3GM_fnc_supportLog };
-    { unassignVehicle _x; moveOut _x; _x moveInCargo _heli } forEach ((units _squad) select { alive _x });
-    { if (!isNull _x) then { deleteVehicle _x } } forEach _vehicles;
-    [_id, [_heli] + units _squad] call A3GM_fnc_supportRegister;
-    private _lz = [_target getPos [120, random 360], 150] call A3GM_fnc_medevacLZ;
-    private _landed = [_heli, _lz] call A3GM_fnc_medevacLand;
-    if ([_id] call A3GM_fnc_cancelled) exitWith {
-        ["backup", _id, "cancelled", _target, ""] call A3GM_fnc_supportLog;
-        [_heli, _lz] call A3GM_fnc_medevacLeave;
-        [_squad] call A3GM_fnc_squadRemove;
-    };
-    if (!_landed) exitWith {
-        ["backup", _id, "lost", _target, "helicopter"] call A3GM_fnc_supportLog;
-        [_heli, _lz] call A3GM_fnc_medevacLeave;
-    };
-    [_heli] call A3GM_fnc_heliUnload;
-    ["backup", _id, "arrived", _target, mapGridPosition _lz] call A3GM_fnc_supportLog;
-    [_heli, _lz] call A3GM_fnc_medevacLeave;
-    ["backup", _id, _target, _squad] call A3GM_fnc_backupEscort;
-};
-
-// BACKUP: a rebel squad, by helicopter or by road (random; "air" / "road" to choose). args: [id, player name, how]
+// BACKUP: helicopter air-insertion with armed gunship escort providing cover fire. args: [id, player name]
 A3GM_fnc_backup = {
-    params [["_id", "", [""]], ["_name", "", [""]], ["_how", "", [""]]];
+    params [["_id", "", [""]], ["_name", "", [""]]];
     private _target = [_name] call A3GM_fnc_supportTarget;
     if (isNull _target) exitWith { [false, "no such player"] };
     private _side = side group _target;
-    private _hq = [_target] call A3GM_fnc_rebelHQ;
-    private _reb = missionNamespace getVariable ["A3A_faction_reb", createHashMap];
-    // the rebels' own vehicles when the caller is a rebel, else that side's light vehicles
-    private _cars = if (_side == (missionNamespace getVariable ["teamPlayer", independent])) then {
-        ((_reb getOrDefault ["vehiclesLightArmed", []]) + (_reb getOrDefault ["vehiclesLightUnarmed", []])
-            + ["I_G_Offroad_01_armed_F", "I_G_Offroad_01_F"]) select { _x isEqualType "" && {isClass (configFile >> "CfgVehicles" >> _x)} }
-    } else {
-        [["B_G_Offroad_01_armed_F", "B_MRAP_01_hmg_F", "O_G_Offroad_01_armed_F", "O_MRAP_02_hmg_F", "I_MRAP_03_hmg_F"], _side]
-            call A3GM_fnc_sideClasses
-    };
-    // Candidate roads 1.2-1.6 km out, the HQ side first. Some roads lead nowhere (a fenced airfield, a dead end):
-    // the vehicle is moved to the next one if it doesn't get going, and flown in after the last.
-    private _roads = [];
-    {
-        private _a = _x;
-        {
-            private _r = [_target getPos [_x, (_target getDir _hq) + _a], 300] call BIS_fnc_nearestRoad;
-            if (!isNull _r && {(_roads findIf { _x distance2D _r < 300 }) < 0}) then { _roads pushBack _r };
-        } forEach [1500, 1200];
-    } forEach [0, 45, -45, 90, -90, 180];
-    private _road = _roads param [0, objNull];
-    private _byAir = ((random 1 < 0.5 && {_how != "road"}) || {_how == "air"} || {_cars isEqualTo []} || {isNull _road})
-        && {([A3GM_medevacHelis, _side] call A3GM_fnc_sideClasses) isNotEqualTo []};
-    if (!_byAir && {_cars isEqualTo [] || {isNull _road}}) exitWith { [false, "no transport for backup"] };
 
-    if (_byAir) exitWith {
-        private _heli = [_target, _side] call A3GM_fnc_spawnHeli;
-        private _squad = [_side, getPos _heli, 6] call A3GM_fnc_rebelSquad;
-        { _x moveInCargo _heli } forEach units _squad;
-        private _eta = round ((_heli distance2D _target) / 55 + 40);
-        ["backup", _id, "launched", _target, format ["helicopter %1 eta %2", count units _squad, _eta]] call A3GM_fnc_supportLog;
-        [_id, [_heli] + units _squad] call A3GM_fnc_supportRegister;
-        [_id, _target, _heli, _squad] spawn {
-            params ["_id", "_target", "_heli", "_squad"];
-            private _lz = [_target getPos [120, random 360], 150] call A3GM_fnc_medevacLZ;
-            createVehicle ["SmokeShellGreen", _lz, [], 0, "CAN_COLLIDE"];
-            private _landed = [_heli, _lz] call A3GM_fnc_medevacLand;
-            if ([_id] call A3GM_fnc_cancelled) exitWith {
-                ["backup", _id, "cancelled", _target, ""] call A3GM_fnc_supportLog;
-                [_heli, _lz] call A3GM_fnc_medevacLeave;
-                [_squad] call A3GM_fnc_squadRemove;
-            };
-            if (!_landed) exitWith {
-                ["backup", _id, "lost", _target, "helicopter"] call A3GM_fnc_supportLog;
-                [_heli, _lz] call A3GM_fnc_medevacLeave;
-            };
-            [_heli] call A3GM_fnc_heliUnload;
-            ["backup", _id, "arrived", _target, mapGridPosition _lz] call A3GM_fnc_supportLog;
-            [_heli, _lz] call A3GM_fnc_medevacLeave;
-            ["backup", _id, _target, _squad] call A3GM_fnc_backupEscort;
-        };
-        [true, format ["helicopter %1 %2", 6, mapGridPosition _target]]
-    };
+    private _heliClass = [A3GM_backupHelis, _side] call A3GM_fnc_sideClasses param [0, ""];
+    if (_heliClass == "") exitWith { [false, "no transport helicopter available"] };
+    private _gunshipClass = [A3GM_gunships, _side] call A3GM_fnc_sideClasses param [0, ""];
 
-    private _class = selectRandom _cars;
-    private _spawn = getPos _road;
-    private _car = createVehicle [_class, _spawn, [], 0, "NONE"];
-    _car setDir (_spawn getDir _target);
-    private _squad = [_side, _spawn getPos [8, 0], [5, 6] select ((_car emptyPositions "cargo") >= 5)] call A3GM_fnc_rebelSquad;
-    private _units = units _squad;
-    (_units select 0) moveInDriver _car;
-    if (_car emptyPositions "gunner" > 0 && {count _units > 1}) then { (_units select 1) moveInGunner _car };
-    { if (vehicle _x == _x) then { _x moveInCargo _car } } forEach _units;
-    // the rest ride in a second, unarmed vehicle (an armed technical seats few)
-    private _left = _units select { vehicle _x == _x };
-    private _car2 = objNull;
-    if (_left isNotEqualTo []) then {
-        private _unarmed = ((_reb getOrDefault ["vehiclesLightUnarmed", []]) + (_reb getOrDefault ["vehiclesTruck", []])
-            + ["I_G_Offroad_01_F", "I_G_Van_01_transport_F"]) select { _x isEqualType "" && {isClass (configFile >> "CfgVehicles" >> _x)} };
-        if (_unarmed isNotEqualTo []) then {
-            _car2 = createVehicle [selectRandom _unarmed, _spawn getPos [15, (_spawn getDir _target) + 180], [], 5, "NONE"];
-            _car2 setDir (_spawn getDir _target);
-            (_left select 0) moveInDriver _car2;
-            { if (vehicle _x == _x) then { _x moveInCargo _car2 } } forEach _left;
-        };
-    };
-    { if (vehicle _x == _x) then { deleteVehicle _x } } forEach _units;  // still no seat: don't leave them walking
-    [_id, [_car, _car2] + units _squad] call A3GM_fnc_supportRegister;
-    _squad setBehaviour "SAFE";
-    private _eta = round ((_car distance2D _target) / 12 + 20);
-    ["backup", _id, "launched", _target, format ["%1 %2 eta %3", getText (configFile >> "CfgVehicles" >> _class >> "displayName"),
-        count units _squad, _eta]] call A3GM_fnc_supportLog;
-    [_id, _target, _car, _squad, _car2, _roads] spawn {
-        params ["_id", "_target", "_car", "_squad", "_car2", "_roads"];
-        sleep 2;  // seated first: a move order given at spawn gets dropped
-        _squad selectLeader (driver _car);  // a leader in the back seat stops the driver
-        private _wp = _squad addWaypoint [getPos _target, 20];
-        _wp setWaypointType "MOVE";
-        _wp setWaypointSpeed "NORMAL";  // flat out, one hit 110 km/h on a dirt road and wrecked a wheel 900 m short
-        _squad setCurrentWaypoint _wp;
-        // Not moving after 15 s: no route from this road. Try the next one, then fly them in.
-        private _rolling = false;
-        {
-            private _from = getPos _car;
-            sleep 15;
-            if (_car distance2D _from > 15 || {!alive _car}) exitWith { _rolling = true };
-            private _p = getPos _x;
-            private _dir = _p getDir _target;
-            _car setDir _dir; _car setPos _p;
-            if (!isNull _car2) then { _car2 setDir _dir; _car2 setPos (_p getPos [15, _dir + 180]) };
-            _wp setWaypointPosition [getPos _target, 20];
-            _squad setCurrentWaypoint _wp;
-            driver _car doMove (getPos _target);
-            diag_log text format ["A3GM|diag|backup %1 no route from there: trying the road at %2", _id, mapGridPosition _p];
-        } forEach (_roads select [1, 4]);
-        if (!_rolling && {alive _car} && {_car distance2D _target > 400}) then {
-            private _from = getPos _car;
-            sleep 15;
-            _rolling = _car distance2D _from > 15;
-        };
-        if (!_rolling && {alive _car} && {_car distance2D _target > 400}) exitWith {
-            diag_log text format ["A3GM|diag|backup %1 no road route: flying them in", _id];
-            [_id, _target, _squad, [_car, _car2]] call A3GM_fnc_backupFlyIn;
-        };
-        private _end = time + 420;
-        private _next = 0;
-        waitUntil {
-            sleep 3;
-            if (time > _next) then {
-                _next = time + 15;
-                if (alive driver _car && {leader _squad != driver _car}) then { _squad selectLeader (driver _car) };
-                if (speed _car < 2 && {_car distance2D _target > 150}) then {  // stalled: follow the player, nudge the driver
-                    _wp setWaypointPosition [getPos _target, 20];
-                    _squad setCurrentWaypoint _wp;
-                    driver _car doMove (getPos _target);
+    // Spawn transport helicopter
+    private _heli = [_target, _side, [_heliClass], [0, 0, 0]] call A3GM_fnc_spawnHeli;
+    if (isNull _heli) exitWith { [false, "failed to spawn transport helicopter"] };
+
+    // Spawn armed escort gunship if available
+    private _gunship = if (_gunshipClass != "") then {
+        [_target, _side, [_gunshipClass], [150, 150, 30]] call A3GM_fnc_spawnHeli
+    } else { objNull };
+
+    // Fill 100% of transport passenger seats
+    private _capacity = (_heli emptyPositions "cargo") max 8;
+    private _squad = [_side, getPos _heli, _capacity] call A3GM_fnc_rebelSquad;
+    { _x moveInCargo _heli } forEach units _squad;
+
+    private _assets = [_heli] + units _squad;
+    if (!isNull _gunship) then { _assets pushBack _gunship };
+    [_id, _assets] call A3GM_fnc_supportRegister;
+
+    private _eta = round ((_heli distance2D _target) / 55 + 40);
+    ["backup", _id, "launched", _target, format ["helicopter %1 eta %2", count units _squad, _eta]] call A3GM_fnc_supportLog;
+
+    // Launch gunship escort routine
+    if (!isNull _gunship) then {
+        private _gunshipGrp = group driver _gunship;
+        _gunshipGrp setBehaviour "COMBAT";
+        _gunshipGrp setCombatMode "RED";
+        _gunship lockCargo true;
+        _gunship flyInHeight 120;
+        (driver _gunship) setSkill 0.9;
+        if (!isNull (gunner _gunship)) then { (gunner _gunship) setSkill 0.95 };
+
+        [_id, _target, _gunship, _gunshipGrp] spawn {
+            params ["_id", "_target", "_gunship", "_gunshipGrp"];
+            private _center = getPos _target;
+            private _wp = _gunshipGrp addWaypoint [_center, 0];
+            _wp setWaypointType "LOITER";
+            _wp setWaypointLoiterType "CIRCLE_L";
+            _wp setWaypointLoiterRadius 300;
+            _wp setWaypointSpeed "NORMAL";
+
+            waitUntil {
+                sleep 2;
+                [_gunship] call A3GM_fnc_heliLost || {_gunship distance2D _center < 700} || {[_id] call A3GM_fnc_cancelled}
+            };
+            if (!([_gunship] call A3GM_fnc_heliLost) && {!([_id] call A3GM_fnc_cancelled)}) then {
+                ["backup", _id, "escort_onstation", _target, mapGridPosition _center] call A3GM_fnc_supportLog;
+            };
+
+            private _hostile = call A3GM_fnc_hostileSides;
+            private _end = time + 500;
+            while { !([_gunship] call A3GM_fnc_heliLost) && {time < _end} && {!([_id] call A3GM_fnc_cancelled)} } do {
+                if (alive _target && {_target distance2D _center > 150}) then {
+                    _center = getPos _target;
+                    _wp setWaypointPosition [_center, 0];
                 };
-                diag_log text format ["A3GM|diag|car %1 at %2 dist %3 speed %4 leader %5 (%6) cmd %7 ready %8 behaviour %9 path %10 move %11 canMove %12 fuel %13 dmg %14 locked %15 engine %16 local %17",
-                    typeOf _car, mapGridPosition _car, round (_car distance2D _target), round speed _car, name leader _squad,
-                    assignedVehicleRole (leader _squad), currentCommand driver _car, unitReady driver _car, behaviour driver _car,
-                    (driver _car) checkAIFeature "PATH", (driver _car) checkAIFeature "MOVE", canMove _car, fuel _car,
-                    damage _car, locked _car, isEngineOn _car, local driver _car];
+                private _enemies = (_center nearEntities [["CAManBase", "LandVehicle"], 700]) select { alive _x && {side group _x in _hostile} };
+                {
+                    _gunshipGrp reveal [_x, 3.5];
+                    if (!isNull (gunner _gunship)) then { (gunner _gunship) doTarget _x };
+                } forEach _enemies;
+
+                private _hasAmmo = ({ (_x select 2) > 0 } count (magazinesAllTurrets _gunship)) > 0;
+                if (!_hasAmmo) exitWith {
+                    diag_log text format ["A3GM|diag|backup %1 gunship out of ammo", _id];
+                };
+                sleep 10;
             };
-            // a wrecked vehicle or a driver who's out of it isn't going any further
-            !alive _car || {time > _end} || {_car distance2D _target < 150} || {({ alive _x } count units _squad) == 0}
-                || {!canMove _car} || {!alive driver _car} || {[_id] call A3GM_fnc_cancelled}
+
+            if ([_id] call A3GM_fnc_cancelled) then {
+                ["backup", _id, "escort_cancelled", _target, ""] call A3GM_fnc_supportLog;
+            } else {
+                ["backup", _id, ["escort_rtb", "escort_lost"] select ([_gunship] call A3GM_fnc_heliLost), _target, ""] call A3GM_fnc_supportLog;
+            };
+            _gunshipGrp setCombatMode "BLUE";
+            _gunshipGrp setBehaviour "CARELESS";
+            while { count waypoints _gunshipGrp > 0 } do { deleteWaypoint [_gunshipGrp, 0] };
+            [_gunship, getPos _gunship] call A3GM_fnc_medevacLeave;
         };
-        if (({ alive _x } count units _squad) == 0) exitWith { ["backup", _id, "lost", _target, "vehicle"] call A3GM_fnc_supportLog };
+    };
+
+    // Transport flight and unloading routine
+    [_id, _target, _heli, _squad] spawn {
+        params ["_id", "_target", "_heli", "_squad"];
+        private _lz = [_target getPos [120 + random 50, random 360], 150] call A3GM_fnc_medevacLZ;
+        private _smoke = createVehicle ["SmokeShellGreen", _lz, [], 0, "CAN_COLLIDE"];
+        ["backup", _id, "landing", _target, mapGridPosition _lz] call A3GM_fnc_supportLog;
+
+        private _landed = [_heli, _lz] call A3GM_fnc_medevacLand;
         if ([_id] call A3GM_fnc_cancelled) exitWith {
             ["backup", _id, "cancelled", _target, ""] call A3GM_fnc_supportLog;
-            [_squad, [_car, _car2]] call A3GM_fnc_squadRemove;
+            [_heli, _lz] call A3GM_fnc_medevacLeave;
+            [_squad] call A3GM_fnc_squadRemove;
         };
-        // broken down more than 1 km out: a helicopter brings them the rest of the way (closer, they walk)
-        if (_car distance2D _target > 1000 && {!canMove _car || {!alive driver _car}}) exitWith {
-            diag_log text format ["A3GM|diag|backup %1 vehicle out of action at %2: flying them in", _id, mapGridPosition _car];
-            [_id, _target, _squad, [_car, _car2]] call A3GM_fnc_backupFlyIn;
+        if (!_landed) exitWith {
+            ["backup", _id, "lost", _target, "helicopter"] call A3GM_fnc_supportLog;
+            [_heli, _lz] call A3GM_fnc_medevacLeave;
+            [_squad] call A3GM_fnc_squadRemove;
         };
-        // the crew-served weapon stays manned; everyone else gets out and fights
-        { if (_x != gunner _car && {_x != driver _car}) then { unassignVehicle _x; moveOut _x } } forEach units _squad;
-        if (!isNull _car2) then { _car2 setVariable ["A3GM_extra", true] };
+
+        createVehicle ["SmokeShellGreen", getPosATL _heli, [], 0, "CAN_COLLIDE"];
+
+        // Unload all passengers reliably
+        {
+            unassignVehicle _x;
+            [_x] orderGetIn false;
+            [_x] allowGetIn false;
+            _x leaveVehicle _heli;
+            moveOut _x;
+        } forEach units _squad;
+
+        private _unloadTimeout = time + 45;
+        waitUntil {
+            sleep 2;
+            {
+                if (vehicle _x == _heli) then {
+                    unassignVehicle _x;
+                    [_x] orderGetIn false;
+                    [_x] allowGetIn false;
+                    _x leaveVehicle _heli;
+                    moveOut _x;
+                };
+            } forEach units _squad;
+            !alive _heli || {([_heli] call A3GM_fnc_heliPassengers) isEqualTo []} || {time > _unloadTimeout}
+        };
+
+        ["backup", _id, "arrived", _target, mapGridPosition _lz] call A3GM_fnc_supportLog;
+        [_heli, _lz] call A3GM_fnc_medevacLeave;
+
         _squad setBehaviour "AWARE";
-        // "arrived" only when they're really there; held up far out, they come on foot
-        ["backup", _id, ["stuck", "arrived"] select (_car distance2D _target < 400), _target, mapGridPosition _car] call A3GM_fnc_supportLog;
-        ["backup", _id, _target, _squad, [_car, _car2]] call A3GM_fnc_backupEscort;
+        _squad setCombatMode "RED";
+        _squad selectLeader ((units _squad) select 0);
+
+        ["backup", _id, _target, _squad] call A3GM_fnc_backupEscort;
     };
-    [true, format ["vehicle %1 %2", { alive _x } count units _squad, mapGridPosition _target]]
+
+    [true, format ["helicopter %1 %2 eta %3", count units _squad, mapGridPosition _target, _eta]]
 };
 
 // UAV: an unarmed Greyhawk loitering over the player for 15 minutes; the player gets a UAV terminal if they
