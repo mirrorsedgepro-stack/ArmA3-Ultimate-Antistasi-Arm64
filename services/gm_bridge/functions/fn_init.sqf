@@ -367,16 +367,14 @@ A3GM_fnc_unmark = {
 //   A3GM|medevac|id|stage|player|detail   stage: launched, landing, landed, healed, aboard, wheelsup, hq, done, failed
 A3GM_medevacHelis = ["I_Heli_Transport_02_F", "I_Heli_light_03_unarmed_F", "B_Heli_Transport_01_F", "B_Heli_Light_01_F",
     "O_Heli_Light_02_unarmed_F", "O_Heli_Transport_04_covered_F"];
-A3GM_backupHelis = ["I_Heli_Transport_02_F", "B_Heli_Transport_01_F", "O_Heli_Transport_04_covered_F",
-    "B_Heli_Transport_03_F", "CUP_I_UH60M_Unarmed_ION", "CUP_B_UH60M_US", "CUP_B_CH47F_USA",
-    "CUP_O_Mi8_VVS_Underslung", "CUP_I_Mi17_UN", "I_Heli_light_03_unarmed_F", "O_Heli_Light_02_unarmed_F"];
+// Troop lift (backup drop-off, player pickup): the Mi-171Sh, vanilla transports if CUP isn't loaded
+A3GM_backupHelis = ["CUP_B_Mi171Sh_CDF", "CUP_B_Mi171Sh_ACR", "CUP_B_Mi171Sh_Unarmed_ACR",
+    "I_Heli_Transport_02_F", "B_Heli_Transport_01_F", "O_Heli_Transport_04_covered_F", "B_Heli_Transport_03_F"];
 
-// The available classes from a list, the given side's own first (I_ independent, B_ west, O_ east)
+// The available classes from a list, in the list's order of preference
 A3GM_fnc_sideClasses = {
     params ["_classes", "_side"];
-    private _prefix = ["I_", "B_", "O_"] select (([independent, west, east] find _side) max 0);
-    private _ok = _classes select { isClass (configFile >> "CfgVehicles" >> _x) };
-    (_ok select { (_x select [0, 2]) == _prefix }) + (_ok select { (_x select [0, 2]) != _prefix })
+    _classes select { isClass (configFile >> "CfgVehicles" >> _x) }
 };
 
 // The player a support asset is for; "@<grid>" makes a stand-in casualty there (a wounded rebel, removed after
@@ -821,7 +819,7 @@ A3GM_fnc_equipMilitaryUnit = {
             _primary = if (_isIndep) then { "arifle_Mk20_F" } else { if (_isWest) then { "arifle_MX_F" } else { "arifle_Katiba_F" } };
             _primaryMags = [["30Rnd_556x45_Stanag", 6]];
             _secondary = if (_isIndep) then { "launch_NLAW_F" } else { if (_isWest) then { "launch_NLAW_F" } else { "launch_RPG32_F" } };
-            _secondaryMags = [["NLAW_F", 2], ["RPG32_F", 2]] select (!_isIndep && !_isWest);
+            _secondaryMags = [[["NLAW_F", 2]], [["RPG32_F", 2]]] select (!_isIndep && !_isWest);
         };
         case "MEDIC": {
             _primary = if (_isIndep) then { "arifle_Mk20C_F" } else { if (_isWest) then { "arifle_MXC_F" } else { "arifle_Katiba_C_F" } };
@@ -830,7 +828,7 @@ A3GM_fnc_equipMilitaryUnit = {
         case "MARKSMAN": {
             _primary = if (_isIndep) then { "srifle_DMR_06_camo_F" } else { if (_isWest) then { "srifle_EBR_F" } else { "srifle_DMR_01_F" } };
             _optic = "optic_SOS";
-            _primaryMags = [["20Rnd_762x51_Mag", 7], ["10Rnd_762x54_Mag", 7]] select (!_isIndep && !_isWest);
+            _primaryMags = [[["20Rnd_762x51_Mag", 7]], [["10Rnd_762x54_Mag", 7]]] select (!_isIndep && !_isWest);
             _unit addWeapon "Binocular";
         };
         case "GL": {
@@ -1112,7 +1110,8 @@ A3GM_fnc_uav = {
     private _target = [_name] call A3GM_fnc_supportTarget;
     if (isNull _target) exitWith { [false, "no such player"] };
     private _side = side group _target;
-    private _class = [["I_UAV_02_dynamicLoadout_F", "B_UAV_02_dynamicLoadout_F", "O_UAV_02_dynamicLoadout_F",
+    // the Burraq UCAV (ACE's name for the K40 Ababil-3), loaded; the caller can take it with their UAV terminal
+    private _class = [["O_UAV_02_CAS_F", "O_UAV_02_dynamicLoadout_F", "I_UAV_02_dynamicLoadout_F", "B_UAV_02_dynamicLoadout_F",
         "I_UAV_01_F", "B_UAV_01_F", "O_UAV_01_F"], _side] call A3GM_fnc_sideClasses param [0, ""];
     if (_class == "") exitWith { [false, "no UAV available"] };
     private _hq = [_target] call A3GM_fnc_rebelHQ;
@@ -1124,7 +1123,6 @@ A3GM_fnc_uav = {
     createVehicleCrew _uav;
     private _grp = createGroup [_side, true];
     (crew _uav) joinSilent _grp;
-    { _uav setPylonLoadout [_forEachIndex + 1, ""] } forEach (getPylonMagazines _uav);  // recon only
     _grp setBehaviour "CARELESS";
     _grp setCombatMode "BLUE";
     _uav flyInHeight 450;
@@ -1193,7 +1191,7 @@ A3GM_fnc_transport = {
     if (_dest isEqualType "") exitWith { [false, _dest] };
     if (_dest isEqualTo [0, 0, 0]) exitWith { [false, "HQ has no fixed position right now"] };
     if (_target distance2D _dest < 500) exitWith { [false, "you're already there"] };
-    private _heli = [_target, side group _target] call A3GM_fnc_spawnHeli;
+    private _heli = [_target, side group _target, A3GM_backupHelis] call A3GM_fnc_spawnHeli;
     if (isNull _heli) exitWith { [false, "no helicopter available"] };
     [_id, [_heli]] call A3GM_fnc_supportRegister;
     private _eta = round ((_heli distance2D _target) / 55 + 40);
@@ -1237,8 +1235,9 @@ A3GM_fnc_transport = {
 
 // GUNSHIP: an armed helicopter orbiting the player for 10 minutes, shown every enemy within 700 m of them and
 // free to engage. args: [id, player name]. Stages: launched, onstation, rtb, lost
-A3GM_gunships = ["I_Heli_light_03_dynamicLoadout_F", "B_Heli_Light_01_dynamicLoadout_F", "O_Heli_Light_02_dynamicLoadout_F",
-    "B_Heli_Attack_01_dynamicLoadout_F", "O_Heli_Attack_02_dynamicLoadout_F"];
+// Escort and gunship calls: the UH-1Y Venom gunship, vanilla armed helicopters if CUP isn't loaded
+A3GM_gunships = ["CUP_B_UH1Y_GUNSHIP_USMC", "CUP_B_UH1Y_Gunship_Dynamic_USMC",
+    "I_Heli_light_03_dynamicLoadout_F", "B_Heli_Light_01_dynamicLoadout_F", "O_Heli_Light_02_dynamicLoadout_F"];
 A3GM_fnc_gunship = {
     params [["_id", "", [""]], ["_name", "", [""]]];
     private _target = [_name] call A3GM_fnc_supportTarget;
@@ -1836,7 +1835,6 @@ A3GM_chatTrace = false; publicVariable "A3GM_chatTrace";  // true: every client 
     // Commands are taken at once; game actions wait for the campaign (Antistasi loads it when the first player
     // joins), only these work before: chat, the grid convention, the map export, members (queued).
     private _preInit = ["SAY", "GRIDINFO", "MAPEXPORT", "MEMBERS"];
-    private _slow = ["MISSION"];  // these wait for the game (up to 15 s): run beside the queue, not in it
     private _run = {
         params ["_id", "_action", "_args", "_fn"];
         private _res = _args call _fn;
@@ -1867,7 +1865,8 @@ A3GM_chatTrace = false; publicVariable "A3GM_chatTrace";  // true: every client 
                     _fn = { [false, "the campaign hasn't started yet: it loads when the first player joins"] };
                 };
             };
-            if (_action in _slow) then { [_id, _action, _args, _fn] spawn _run } else { [_id, _action, _args, _fn] call _run };
+            // each command in its own script: a script error in one (or a 15 s MISSION wait) must not stop the queue
+            [_id, _action, _args, _fn] spawn _run;
         };
     };
 };

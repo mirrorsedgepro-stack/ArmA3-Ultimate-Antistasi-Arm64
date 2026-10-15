@@ -75,11 +75,11 @@ cmd_restart() {
 }
 
 cmd_schedule_restart() {
-    # 00:00 and 12:00 UTC; restart_when_empty.sh waits until nobody is online, backs up, then restarts arma3 only.
-    # flock skips the run if the previous one is still waiting for an empty server.
-    local line="0 */12 * * * cd ${ROOT_DIR} && flock -n /tmp/armaa_restart.lock env EMPTY_FOR=60 ./scripts/restart_when_empty.sh >> logs/scheduled_restart.log 2>&1"
-    { crontab -l 2>/dev/null | grep -vF 'restart_when_empty.sh'; echo "$line"; } | crontab -
-    echo "Installed:"; crontab -l | grep -F 'restart_when_empty.sh'
+    # 00:00 and 12:00 UTC: restart_announced.sh warns players in game for 5 minutes, backs up, restarts arma3 only.
+    # (restart_when_empty.sh is the gentler ad-hoc option: it waits for an empty server.)
+    local line="0 */12 * * * cd ${ROOT_DIR} && flock -n /tmp/armaa_restart.lock ./scripts/restart_announced.sh >> logs/scheduled_restart.log 2>&1"
+    { crontab -l 2>/dev/null | grep -vE 'restart_(when_empty|announced)\.sh'; echo "$line"; } | crontab -
+    echo "Installed:"; crontab -l | grep -F 'restart_announced.sh'
 }
 
 cmd_restart_arma() {

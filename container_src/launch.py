@@ -156,9 +156,10 @@ if clients != 0:
         print("LAUNCHING ARMA CLIENT {} WITH".format(i), client_launch + hc_args)
         # Relaunch HCs that exit so the server gets its AI offload back
         # (Antistasi re-registers reconnecting HCs)
+        # Staggered: three HCs connecting in the same second raced on /root/Arma3.cfg and the server handshake
         subprocess.Popen(
-            "while true; do {}; echo \"HC {} exited with code $?, relaunching in 15s\"; sleep 15; done".format(
-                client_launch + hc_password + hc_args, i
+            "sleep {}; while true; do {}; echo \"HC {} exited with code $?, relaunching in 15s\"; sleep 15; done".format(
+                i * 30, client_launch + hc_password + hc_args, i
             ),
             shell=True,
         )
